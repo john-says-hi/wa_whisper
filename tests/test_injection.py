@@ -140,12 +140,57 @@ def test_auto_injection_routes_warp_to_xdotool(tmp_path, monkeypatch):
     assert "Warp" in (tmp_path / "log.txt").read_text(encoding="utf-8")
 
 
-def test_auto_injection_routes_orca_to_daemon_without_xdotool(tmp_path, monkeypatch):
-    daemon_calls = []
+def test_auto_injection_routes_orca_to_focused_clipboard_paste(tmp_path, monkeypatch):
+    paste_calls = []
     events = []
 
     def fail_xdotool(*_args, **_kwargs):
         raise AssertionError("Orca auto mode must not use xdotool")
+
+    def fail_orca(*_args, **_kwargs):
+        raise AssertionError("Orca auto mode should try focused clipboard paste first")
+
+    monkeypatch.setattr(
+        main_mod,
+        "get_active_window_info",
+        lambda *_args: main_mod.ActiveWindowInfo(
+            window_id="456",
+            wm_classes=("orca", "Orca"),
+            name="Orca",
+            pid=8377,
+            process_args="orca",
+        ),
+    )
+    monkeypatch.setattr(main_mod, "type_text_with_xdotool", fail_xdotool)
+    monkeypatch.setattr(
+        main_mod,
+        "paste_text_with_clipboard_shortcut",
+        lambda *args: paste_calls.append(args) or True,
+    )
+    monkeypatch.setattr(main_mod, "send_text_to_orca_daemon", fail_orca)
+    monkeypatch.setattr(main_mod, "play_completion_beep", lambda *_args: events.append("beep"))
+
+    delivered = main_mod.inject_text(
+        "hello orca",
+        Path("/usr/bin/xdotool"),
+        tmp_path / "log.txt",
+        enable_beep=True,
+        injection_mode=main_mod.InjectionMode.AUTO,
+        orca_daemon_dir=tmp_path,
+        orca_session_id="session-1",
+    )
+
+    assert delivered is True
+    assert paste_calls == [("hello orca", Path("/usr/bin/xdotool"), tmp_path / "log.txt")]
+    assert events == ["beep"]
+    assert "selected orca-clipboard-paste" in (tmp_path / "log.txt").read_text(encoding="utf-8")
+
+
+def test_auto_injection_orca_clipboard_failure_falls_back_to_daemon(tmp_path, monkeypatch):
+    daemon_calls = []
+
+    def fail_xdotool(*_args, **_kwargs):
+        raise AssertionError("failed Orca clipboard paste must not fall back to xdotool typing")
 
     def fake_orca(text, log_path, **kwargs):
         daemon_calls.append((text, log_path, kwargs))
@@ -163,14 +208,14 @@ def test_auto_injection_routes_orca_to_daemon_without_xdotool(tmp_path, monkeypa
         ),
     )
     monkeypatch.setattr(main_mod, "type_text_with_xdotool", fail_xdotool)
+    monkeypatch.setattr(main_mod, "paste_text_with_clipboard_shortcut", lambda *_args: False)
     monkeypatch.setattr(main_mod, "send_text_to_orca_daemon", fake_orca)
-    monkeypatch.setattr(main_mod, "play_completion_beep", lambda *_args: events.append("beep"))
 
     delivered = main_mod.inject_text(
         "hello orca",
         Path("/usr/bin/xdotool"),
         tmp_path / "log.txt",
-        enable_beep=True,
+        enable_beep=False,
         injection_mode=main_mod.InjectionMode.AUTO,
         orca_daemon_dir=tmp_path,
         orca_session_id="session-1",
@@ -184,13 +229,13 @@ def test_auto_injection_routes_orca_to_daemon_without_xdotool(tmp_path, monkeypa
             {"daemon_dir": tmp_path, "preferred_session_id": "session-1"},
         )
     ]
-    assert events == ["beep"]
-    assert "selected orca-daemon" in (tmp_path / "log.txt").read_text(encoding="utf-8")
+    log_text = (tmp_path / "log.txt").read_text(encoding="utf-8")
+    assert "focused clipboard paste failed; falling back to daemon" in log_text
 
 
 def test_auto_injection_orca_failure_does_not_fallback_to_xdotool(tmp_path, monkeypatch):
     def fail_xdotool(*_args, **_kwargs):
-        raise AssertionError("failed Orca daemon auto mode must not fall back to xdotool")
+        raise AssertionError("failed Orca auto mode must not fall back to xdotool typing")
 
     monkeypatch.setattr(
         main_mod,
@@ -204,6 +249,7 @@ def test_auto_injection_orca_failure_does_not_fallback_to_xdotool(tmp_path, monk
         ),
     )
     monkeypatch.setattr(main_mod, "type_text_with_xdotool", fail_xdotool)
+    monkeypatch.setattr(main_mod, "paste_text_with_clipboard_shortcut", lambda *_args: False)
     monkeypatch.setattr(main_mod, "send_text_to_orca_daemon", lambda *_args, **_kwargs: False)
 
     delivered = main_mod.inject_text(
@@ -215,7 +261,40 @@ def test_auto_injection_orca_failure_does_not_fallback_to_xdotool(tmp_path, monk
     )
 
     assert delivered is False
-    assert "skipped xdotool fallback" in (tmp_path / "log.txt").read_text(encoding="utf-8")
+    assert "skipped xdotool typing fallback" in (tmp_path / "log.txt").read_text(encoding="utf-8")
+
+
+def test_clipboard_paste_shortcut_restores_previous_clipboard(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if cmd == ["/usr/bin/xclip", "-selection", "clipboard", "-out"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"old clipboard")
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"")
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(main_mod.time, "sleep", lambda *_args: None)
+
+    delivered = main_mod.paste_text_with_clipboard_shortcut(
+        "hello orca",
+        Path("/usr/bin/xdotool"),
+        tmp_path / "log.txt",
+        clipboard_bin=Path("/usr/bin/xclip"),
+    )
+
+    assert delivered is True
+    assert calls[0][0] == ["/usr/bin/xclip", "-selection", "clipboard", "-out"]
+    assert calls[1][0] == ["/usr/bin/xclip", "-selection", "clipboard", "-in"]
+    assert calls[1][1]["input"] == b"hello orca"
+    assert calls[2][0] == [
+        "/usr/bin/xdotool",
+        "key",
+        "--clearmodifiers",
+        "ctrl+shift+v",
+    ]
+    assert calls[3][0] == ["/usr/bin/xclip", "-selection", "clipboard", "-in"]
+    assert calls[3][1]["input"] == b"old clipboard"
 
 
 def test_auto_injection_unknown_window_uses_xdotool(tmp_path, monkeypatch):

@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
@@ -71,6 +72,7 @@ ORCA_BRACKETED_PASTE_START = "\x1b[200~"
 ORCA_DAEMON_PROTOCOL_VERSION = 10
 ORCA_DAEMON_TIMEOUT_SECONDS = 2.0
 DEFAULT_ORCA_STATE_PATH = Path.home() / ".config" / "orca" / "orca-data.json"
+CLIPBOARD_PASTE_SETTLE_SECONDS = 0.25
 
 
 class InjectionMode(str, Enum):
@@ -349,7 +351,17 @@ def inject_text_auto(
 ) -> bool:
     active_window = get_active_window_info(xdotool_bin, log_path)
     if active_window and is_orca_window(active_window):
-        write_log(f"Auto injection selected orca-daemon for {describe_active_window(active_window)}", log_path)
+        write_log(
+            f"Auto injection selected orca-clipboard-paste for {describe_active_window(active_window)}",
+            log_path,
+        )
+        delivered = paste_text_with_clipboard_shortcut(text, xdotool_bin, log_path)
+        if delivered:
+            if enable_beep:
+                play_completion_beep(log_path)
+            return True
+
+        write_log("Orca focused clipboard paste failed; falling back to daemon", log_path)
         delivered = inject_text_orca_daemon(
             text,
             log_path,
@@ -358,7 +370,7 @@ def inject_text_auto(
             preferred_session_id=preferred_session_id,
         )
         if not delivered:
-            write_log("Orca daemon injection failed in auto mode; skipped xdotool fallback", log_path)
+            write_log("Orca daemon injection failed in auto mode; skipped xdotool typing fallback", log_path)
         return delivered
 
     if active_window and is_warp_window(active_window):
@@ -384,6 +396,85 @@ def type_text_with_xdotool(text: str, xdotool_bin: Path, log_path: Path) -> bool
         )
     except subprocess.CalledProcessError as exc:
         write_log(f"xdotool failed: {exc}", log_path)
+        return False
+    return True
+
+
+def paste_text_with_clipboard_shortcut(
+    text: str,
+    xdotool_bin: Path,
+    log_path: Path,
+    *,
+    clipboard_bin: Optional[Path] = None,
+) -> bool:
+    xclip_bin = clipboard_bin or resolve_xclip_path()
+    if xclip_bin is None:
+        write_log("Clipboard paste failed: xclip not found", log_path)
+        return False
+
+    previous_clipboard = read_xclip_clipboard(xclip_bin, log_path)
+    if previous_clipboard is None:
+        return False
+
+    if not write_xclip_clipboard(xclip_bin, text.encode("utf-8"), log_path):
+        return False
+
+    delivered = send_clipboard_paste_shortcut(xdotool_bin, log_path)
+    time.sleep(CLIPBOARD_PASTE_SETTLE_SECONDS)
+    restored = write_xclip_clipboard(xclip_bin, previous_clipboard, log_path)
+    if not restored:
+        write_log("Clipboard paste warning: previous clipboard restore failed", log_path)
+    return delivered
+
+
+def resolve_xclip_path() -> Optional[Path]:
+    resolved = shutil.which("xclip")
+    return Path(resolved) if resolved else None
+
+
+def read_xclip_clipboard(xclip_bin: Path, log_path: Path) -> Optional[bytes]:
+    try:
+        completed = subprocess.run(
+            [str(xclip_bin), "-selection", "clipboard", "-out"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        )
+    except subprocess.CalledProcessError:
+        return b""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        write_log(f"Clipboard read failed: {exc}", log_path)
+        return None
+    return completed.stdout
+
+
+def write_xclip_clipboard(xclip_bin: Path, data: bytes, log_path: Path) -> bool:
+    try:
+        subprocess.run(
+            [str(xclip_bin), "-selection", "clipboard", "-in"],
+            input=data,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        write_log(f"Clipboard write failed: {exc}", log_path)
+        return False
+    return True
+
+
+def send_clipboard_paste_shortcut(xdotool_bin: Path, log_path: Path) -> bool:
+    try:
+        subprocess.run(
+            [str(xdotool_bin), "key", "--clearmodifiers", "ctrl+shift+v"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        write_log(f"Clipboard paste shortcut failed: {exc}", log_path)
         return False
     return True
 
