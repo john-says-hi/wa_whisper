@@ -70,6 +70,7 @@ ORCA_BRACKETED_PASTE_END = "\x1b[201~"
 ORCA_BRACKETED_PASTE_START = "\x1b[200~"
 ORCA_DAEMON_PROTOCOL_VERSION = 10
 ORCA_DAEMON_TIMEOUT_SECONDS = 2.0
+DEFAULT_ORCA_STATE_PATH = Path.home() / ".config" / "orca" / "orca-data.json"
 
 
 class InjectionMode(str, Enum):
@@ -522,6 +523,7 @@ def send_text_to_orca_daemon(
             session = select_orca_daemon_session(
                 sessions,
                 preferred_session_id=preferred_session_id,
+                active_state_path=DEFAULT_ORCA_STATE_PATH,
             )
             if session is None:
                 candidates = format_orca_session_candidates(sessions)
@@ -614,19 +616,17 @@ def select_orca_daemon_session(
     sessions: list[dict[str, object]],
     *,
     preferred_session_id: Optional[str] = None,
+    active_state_path: Optional[Path] = None,
 ) -> Optional[dict[str, object]]:
     if preferred_session_id:
-        return next(
-            (
-                session
-                for session in sessions
-                if (
-                    is_live_orca_session(session)
-                    and get_orca_session_id(session) == preferred_session_id
-                )
-            ),
-            None,
-        )
+        return find_live_orca_session_by_id(sessions, preferred_session_id)
+
+    if active_state_path is not None:
+        active_session_id = read_active_orca_terminal_session_id(active_state_path)
+        if active_session_id:
+            active_session = find_live_orca_session_by_id(sessions, active_session_id)
+            if active_session is not None:
+                return active_session
 
     live_sessions = [session for session in sessions if is_live_orca_session(session)]
     if len(live_sessions) == 1:
@@ -641,6 +641,176 @@ def select_orca_daemon_session(
     if len(codex_sessions) == 1:
         return codex_sessions[0]
     return None
+
+
+def find_live_orca_session_by_id(
+    sessions: list[dict[str, object]],
+    session_id: str,
+) -> Optional[dict[str, object]]:
+    return next(
+        (
+            session
+            for session in sessions
+            if is_live_orca_session(session) and get_orca_session_id(session) == session_id
+        ),
+        None,
+    )
+
+
+def read_active_orca_terminal_session_id(state_path: Path) -> Optional[str]:
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(state, dict):
+        return None
+    workspace_session = state.get("workspaceSession")
+    if not isinstance(workspace_session, dict):
+        return None
+    return resolve_active_orca_terminal_session_id(workspace_session)
+
+
+def resolve_active_orca_terminal_session_id(
+    workspace_session: dict[str, object],
+) -> Optional[str]:
+    active_worktree_id = coerce_nonempty_string(workspace_session.get("activeWorktreeId"))
+    active_tab_ids = collect_active_orca_tab_ids(workspace_session, active_worktree_id)
+
+    for active_tab_id in active_tab_ids:
+        session_id = resolve_orca_tab_terminal_session_id(
+            workspace_session,
+            active_tab_id,
+            active_worktree_id,
+        )
+        if session_id:
+            return session_id
+    return None
+
+
+def collect_active_orca_tab_ids(
+    workspace_session: dict[str, object],
+    active_worktree_id: Optional[str],
+) -> list[str]:
+    active_tab_ids: list[str] = []
+
+    active_tab_id_by_worktree = workspace_session.get("activeTabIdByWorktree")
+    if active_worktree_id and isinstance(active_tab_id_by_worktree, dict):
+        append_unique_nonempty_string(
+            active_tab_ids,
+            active_tab_id_by_worktree.get(active_worktree_id),
+        )
+
+    active_group_id = read_active_orca_group_id(workspace_session, active_worktree_id)
+    tab_groups = workspace_session.get("tabGroups")
+    if active_worktree_id and active_group_id and isinstance(tab_groups, dict):
+        groups = tab_groups.get(active_worktree_id)
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict) or group.get("id") != active_group_id:
+                    continue
+                append_unique_nonempty_string(active_tab_ids, group.get("activeTabId"))
+                break
+
+    append_unique_nonempty_string(active_tab_ids, workspace_session.get("activeTabId"))
+    return active_tab_ids
+
+
+def read_active_orca_group_id(
+    workspace_session: dict[str, object],
+    active_worktree_id: Optional[str],
+) -> Optional[str]:
+    if not active_worktree_id:
+        return None
+    active_group_id_by_worktree = workspace_session.get("activeGroupIdByWorktree")
+    if not isinstance(active_group_id_by_worktree, dict):
+        return None
+    return coerce_nonempty_string(active_group_id_by_worktree.get(active_worktree_id))
+
+
+def resolve_orca_tab_terminal_session_id(
+    workspace_session: dict[str, object],
+    active_tab_id: str,
+    active_worktree_id: Optional[str],
+) -> Optional[str]:
+    return resolve_orca_layout_terminal_session_id(
+        workspace_session,
+        active_tab_id,
+    ) or resolve_orca_tab_list_terminal_session_id(
+        workspace_session,
+        active_tab_id,
+        active_worktree_id,
+    )
+
+
+def resolve_orca_layout_terminal_session_id(
+    workspace_session: dict[str, object],
+    active_tab_id: str,
+) -> Optional[str]:
+    terminal_layouts_by_tab_id = workspace_session.get("terminalLayoutsByTabId")
+    if not isinstance(terminal_layouts_by_tab_id, dict):
+        return None
+
+    layout = terminal_layouts_by_tab_id.get(active_tab_id)
+    if not isinstance(layout, dict):
+        return None
+
+    pty_ids_by_leaf_id = layout.get("ptyIdsByLeafId")
+    if not isinstance(pty_ids_by_leaf_id, dict):
+        return None
+
+    active_leaf_id = coerce_nonempty_string(layout.get("activeLeafId"))
+    if active_leaf_id:
+        active_session_id = coerce_nonempty_string(pty_ids_by_leaf_id.get(active_leaf_id))
+        if active_session_id:
+            return active_session_id
+
+    session_ids = [
+        session_id
+        for session_id in (
+            coerce_nonempty_string(value) for value in pty_ids_by_leaf_id.values()
+        )
+        if session_id
+    ]
+    return session_ids[0] if len(session_ids) == 1 else None
+
+
+def resolve_orca_tab_list_terminal_session_id(
+    workspace_session: dict[str, object],
+    active_tab_id: str,
+    active_worktree_id: Optional[str],
+) -> Optional[str]:
+    tabs_by_worktree = workspace_session.get("tabsByWorktree")
+    if not isinstance(tabs_by_worktree, dict):
+        return None
+
+    worktree_ids = list(tabs_by_worktree)
+    if active_worktree_id in worktree_ids:
+        worktree_ids.remove(active_worktree_id)
+        worktree_ids.insert(0, active_worktree_id)
+
+    for worktree_id in worktree_ids:
+        tabs = tabs_by_worktree.get(worktree_id)
+        if not isinstance(tabs, list):
+            continue
+        for tab in tabs:
+            if not isinstance(tab, dict) or tab.get("id") != active_tab_id:
+                continue
+            return coerce_nonempty_string(tab.get("ptyId"))
+    return None
+
+
+def append_unique_nonempty_string(values: list[str], candidate: object) -> None:
+    value = coerce_nonempty_string(candidate)
+    if value and value not in values:
+        values.append(value)
+
+
+def coerce_nonempty_string(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def is_live_orca_session(session: dict[str, object]) -> bool:

@@ -262,6 +262,57 @@ def test_orca_session_selection_prefers_requested_session_id():
     assert main_mod.get_orca_session_id(selected) == "target"
 
 
+def test_orca_session_selection_prefers_active_orca_tab_state(tmp_path, monkeypatch):
+    state_path = tmp_path / "orca-data.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "workspaceSession": {
+                    "activeWorktreeId": "repo::worktree",
+                    "activeTabId": "stale-global-tab",
+                    "activeTabIdByWorktree": {
+                        "repo::worktree": "active-tab",
+                    },
+                    "terminalLayoutsByTabId": {
+                        "stale-global-tab": {
+                            "activeLeafId": "leaf-stale",
+                            "ptyIdsByLeafId": {
+                                "leaf-stale": "first",
+                            },
+                        },
+                        "active-tab": {
+                            "activeLeafId": "leaf-active",
+                            "ptyIdsByLeafId": {
+                                "leaf-active": "second",
+                            },
+                        },
+                    },
+                    "tabsByWorktree": {
+                        "repo::worktree": [
+                            {"id": "first-tab", "ptyId": "first"},
+                            {"id": "active-tab", "ptyId": "second"},
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    sessions = [
+        {"sessionId": "first", "state": "running", "isAlive": True, "pid": 11},
+        {"sessionId": "second", "state": "running", "isAlive": True, "pid": 12},
+    ]
+
+    monkeypatch.setattr(main_mod, "process_tree_contains", lambda *_args: True)
+
+    selected = main_mod.select_orca_daemon_session(
+        sessions,
+        active_state_path=state_path,
+    )
+
+    assert main_mod.get_orca_session_id(selected) == "second"
+
+
 def test_orca_session_selection_prefers_codex_process(monkeypatch):
     sessions = [
         {"sessionId": "old", "state": "exited", "isAlive": False, "pid": 10},
