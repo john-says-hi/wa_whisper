@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import queue
+import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
+import uuid
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -43,6 +49,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exit-on-esc", action="store_true", default=False, help="Stop listener on ESC.")
     parser.add_argument("--no-voice-isolation", action="store_true", help="Disable placeholder voice isolation.")
     parser.add_argument("--xdotool-path", type=Path, default=None, help="Override xdotool binary path.")
+    parser.add_argument(
+        "--injection-mode",
+        choices=["xdotool-type", "orca-daemon", "auto"],
+        default="xdotool-type",
+        help="Text delivery strategy. The default preserves xdotool typing.",
+    )
+    parser.add_argument("--orca-daemon-dir", type=Path, default=None, help="Override Orca daemon directory.")
+    parser.add_argument("--orca-session-id", default=None, help="Target one Orca daemon terminal session.")
     parser.add_argument("--disable-complete-beep", action="store_true", help="Disable post-paste completion beep.")
     return parser
 
@@ -52,6 +66,25 @@ DEFAULT_BEEP_COMMAND = (
     Path("/usr/bin/paplay"),
     Path("/usr/share/sounds/freedesktop/stereo/bell.oga"),
 )
+ORCA_BRACKETED_PASTE_END = "\x1b[201~"
+ORCA_BRACKETED_PASTE_START = "\x1b[200~"
+ORCA_DAEMON_PROTOCOL_VERSION = 10
+ORCA_DAEMON_TIMEOUT_SECONDS = 2.0
+
+
+class InjectionMode(str, Enum):
+    XDOTOOL_TYPE = "xdotool-type"
+    ORCA_DAEMON = "orca-daemon"
+    AUTO = "auto"
+
+
+@dataclass(frozen=True)
+class ActiveWindowInfo:
+    window_id: str
+    wm_classes: tuple[str, ...]
+    name: str
+    pid: Optional[int]
+    process_args: str
 
 
 def ensure_xdotool(path_override: Optional[Path]) -> Path:
@@ -61,6 +94,13 @@ def ensure_xdotool(path_override: Optional[Path]) -> Path:
     if not resolved:
         raise RuntimeError("xdotool not found; install it to enable text injection.")
     return Path(resolved)
+
+
+def parse_injection_mode(value: str) -> InjectionMode:
+    try:
+        return InjectionMode(value)
+    except ValueError as exc:
+        raise RuntimeError(f"Unsupported injection mode: {value}") from exc
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -88,8 +128,13 @@ def main(argv: Optional[list[str]] = None) -> None:
         rms_threshold=args.rms_threshold,
         preamp=args.preamp,
     )
+    injection_mode = parse_injection_mode(args.injection_mode)
     voice_isolation = None if args.no_voice_isolation else VoiceIsolationPipeline(log_path)
-    xdotool_bin = ensure_xdotool(args.xdotool_path)
+    xdotool_bin = (
+        ensure_xdotool(args.xdotool_path)
+        if injection_mode in (InjectionMode.XDOTOOL_TYPE, InjectionMode.AUTO)
+        else args.xdotool_path or Path("xdotool")
+    )
 
     task_queue: "queue.Queue[TaskItem]" = queue.Queue()
     stop_event = threading.Event()
@@ -118,6 +163,9 @@ def main(argv: Optional[list[str]] = None) -> None:
                 ensure_punct=not args.disable_punctuation,
                 xdotool_bin=xdotool_bin,
                 enable_beep=not args.disable_complete_beep,
+                injection_mode=injection_mode,
+                orca_daemon_dir=args.orca_daemon_dir,
+                orca_session_id=args.orca_session_id,
             )
             task_queue.task_done()
 
@@ -182,6 +230,9 @@ def process_capture(
     ensure_punct: bool,
     xdotool_bin: Path,
     enable_beep: bool,
+    injection_mode: InjectionMode,
+    orca_daemon_dir: Optional[Path],
+    orca_session_id: Optional[str],
 ) -> None:
     write_log(f"Processing capture {audio_path}", log_path)
     if stats:
@@ -205,11 +256,22 @@ def process_capture(
             ensure_punctuation=ensure_punct,
             append_space=append_space,
         )
-        if not text:
+        if not text.strip():
             write_log("No text produced from transcription", log_path)
             return
-        inject_text(text, xdotool_bin, log_path, enable_beep=enable_beep)
-        write_log(f"Injected text: {text}", log_path)
+        injected = inject_text(
+            text,
+            xdotool_bin,
+            log_path,
+            enable_beep=enable_beep,
+            injection_mode=injection_mode,
+            orca_daemon_dir=orca_daemon_dir,
+            orca_session_id=orca_session_id,
+        )
+        if injected:
+            write_log(f"Injected text: {text}", log_path)
+        else:
+            write_log(f"Text injection failed: {text}", log_path)
     except Exception as exc:  # pragma: no cover - defensive log
         write_log(f"Capture processing failed: {exc}", log_path)
     finally:
@@ -218,7 +280,100 @@ def process_capture(
         audio_path.unlink(missing_ok=True)
 
 
-def inject_text(text: str, xdotool_bin: Path, log_path: Path, *, enable_beep: bool) -> None:
+def inject_text(
+    text: str,
+    xdotool_bin: Path,
+    log_path: Path,
+    *,
+    enable_beep: bool,
+    injection_mode: InjectionMode = InjectionMode.XDOTOOL_TYPE,
+    orca_daemon_dir: Optional[Path] = None,
+    orca_session_id: Optional[str] = None,
+) -> bool:
+    if injection_mode == InjectionMode.ORCA_DAEMON:
+        delivered = inject_text_orca_daemon(
+            text,
+            log_path,
+            enable_beep=enable_beep,
+            daemon_dir=orca_daemon_dir,
+            preferred_session_id=orca_session_id,
+        )
+        if not delivered:
+            write_log("Orca daemon injection failed; skipped xdotool fallback", log_path)
+        return delivered
+
+    if injection_mode == InjectionMode.AUTO:
+        return inject_text_auto(
+            text,
+            xdotool_bin,
+            log_path,
+            enable_beep=enable_beep,
+            daemon_dir=orca_daemon_dir,
+            preferred_session_id=orca_session_id,
+        )
+
+    delivered = type_text_with_xdotool(text, xdotool_bin, log_path)
+    if delivered and enable_beep:
+        play_completion_beep(log_path)
+    return delivered
+
+
+def inject_text_orca_daemon(
+    text: str,
+    log_path: Path,
+    *,
+    enable_beep: bool,
+    daemon_dir: Optional[Path] = None,
+    preferred_session_id: Optional[str] = None,
+) -> bool:
+    delivered = send_text_to_orca_daemon(
+        text,
+        log_path,
+        daemon_dir=daemon_dir,
+        preferred_session_id=preferred_session_id,
+    )
+    if delivered and enable_beep:
+        play_completion_beep(log_path)
+    return delivered
+
+
+def inject_text_auto(
+    text: str,
+    xdotool_bin: Path,
+    log_path: Path,
+    *,
+    enable_beep: bool,
+    daemon_dir: Optional[Path] = None,
+    preferred_session_id: Optional[str] = None,
+) -> bool:
+    active_window = get_active_window_info(xdotool_bin, log_path)
+    if active_window and is_orca_window(active_window):
+        write_log(f"Auto injection selected orca-daemon for {describe_active_window(active_window)}", log_path)
+        delivered = inject_text_orca_daemon(
+            text,
+            log_path,
+            enable_beep=enable_beep,
+            daemon_dir=daemon_dir,
+            preferred_session_id=preferred_session_id,
+        )
+        if not delivered:
+            write_log("Orca daemon injection failed in auto mode; skipped xdotool fallback", log_path)
+        return delivered
+
+    if active_window and is_warp_window(active_window):
+        write_log(f"Auto injection selected xdotool-type for Warp {describe_active_window(active_window)}", log_path)
+    elif active_window:
+        write_log(f"Auto injection selected xdotool-type for {describe_active_window(active_window)}", log_path)
+    else:
+        write_log("Auto injection could not identify active window; selected xdotool-type", log_path)
+
+    delivered = type_text_with_xdotool(text, xdotool_bin, log_path)
+    if delivered and enable_beep:
+        play_completion_beep(log_path)
+    return delivered
+
+
+def type_text_with_xdotool(text: str, xdotool_bin: Path, log_path: Path) -> bool:
     try:
         subprocess.run(
             [str(xdotool_bin), "type", "--clearmodifiers", text],
@@ -228,9 +383,336 @@ def inject_text(text: str, xdotool_bin: Path, log_path: Path, *, enable_beep: bo
         )
     except subprocess.CalledProcessError as exc:
         write_log(f"xdotool failed: {exc}", log_path)
-    else:
-        if enable_beep:
-            play_completion_beep(log_path)
+        return False
+    return True
+
+
+def get_active_window_info(xdotool_bin: Path, log_path: Path) -> Optional[ActiveWindowInfo]:
+    try:
+        window_id = subprocess.check_output(
+            [str(xdotool_bin), "getactivewindow"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        ).strip()
+        if not window_id:
+            write_log("Active window detection failed: xdotool returned no window id", log_path)
+            return None
+        return inspect_x11_window(window_id, log_path)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        write_log(f"Active window detection failed: {exc}", log_path)
+    return None
+
+
+def inspect_x11_window(window_id: str, log_path: Path) -> Optional[ActiveWindowInfo]:
+    try:
+        output = subprocess.check_output(
+            ["xprop", "-id", window_id, "WM_CLASS", "WM_NAME", "_NET_WM_PID"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        write_log(f"Active window xprop inspection failed for {window_id}: {exc}", log_path)
+        return None
+
+    wm_classes = parse_xprop_quoted_values(output, "WM_CLASS")
+    name_values = parse_xprop_quoted_values(output, "WM_NAME")
+    pid = parse_xprop_pid(output)
+    return ActiveWindowInfo(
+        window_id=window_id,
+        wm_classes=tuple(wm_classes),
+        name=name_values[0] if name_values else "",
+        pid=pid,
+        process_args=read_process_args(pid),
+    )
+
+
+def parse_xprop_quoted_values(output: str, property_name: str) -> list[str]:
+    for line in output.splitlines():
+        if line.startswith(f"{property_name}("):
+            return re.findall(r'"([^"]*)"', line)
+    return []
+
+
+def parse_xprop_pid(output: str) -> Optional[int]:
+    for line in output.splitlines():
+        if line.startswith("_NET_WM_PID"):
+            _, _, value = line.partition("=")
+            return parse_positive_int(value.strip())
+    return None
+
+
+def read_process_args(pid: Optional[int]) -> str:
+    if pid is None:
+        return ""
+    try:
+        return subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "args="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        ).strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+
+def is_orca_window(window: ActiveWindowInfo) -> bool:
+    haystack = " ".join([*window.wm_classes, window.name, window.process_args]).lower()
+    return "orca" in haystack
+
+
+def is_warp_window(window: ActiveWindowInfo) -> bool:
+    haystack = " ".join([*window.wm_classes, window.name, window.process_args]).lower()
+    return "warp" in haystack
+
+
+def describe_active_window(window: ActiveWindowInfo) -> str:
+    classes = ",".join(window.wm_classes) or "unknown-class"
+    name = window.name or "unknown-name"
+    pid = window.pid if window.pid is not None else "unknown-pid"
+    return f"window id={window.window_id} name={name!r} class={classes!r} pid={pid}"
+
+
+def send_text_to_orca_daemon(
+    text: str,
+    log_path: Path,
+    *,
+    daemon_dir: Optional[Path] = None,
+    preferred_session_id: Optional[str] = None,
+) -> bool:
+    daemon_paths = resolve_orca_daemon_paths(daemon_dir)
+    if daemon_paths is None:
+        write_log("Orca daemon send skipped: daemon socket/token not found", log_path)
+        return False
+
+    socket_path, token_path, protocol_version = daemon_paths
+    try:
+        token = token_path.read_text(encoding="utf-8").strip()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(ORCA_DAEMON_TIMEOUT_SECONDS)
+            client.connect(str(socket_path))
+            stream = client.makefile("rwb")
+
+            write_orca_daemon_frame(
+                stream,
+                {
+                    "type": "hello",
+                    "version": protocol_version,
+                    "token": token,
+                    "role": "control",
+                    "clientId": str(uuid.uuid4()),
+                },
+            )
+            hello_response = read_orca_daemon_frame(stream)
+            if hello_response.get("ok") is not True:
+                write_log(f"Orca daemon hello rejected: {hello_response}", log_path)
+                return False
+
+            write_orca_daemon_frame(
+                stream,
+                {"id": str(uuid.uuid4()), "type": "listSessions", "payload": {}},
+            )
+            sessions_response = read_orca_daemon_frame(stream)
+            if sessions_response.get("ok") is not True:
+                write_log(f"Orca daemon listSessions failed: {sessions_response}", log_path)
+                return False
+
+            sessions = extract_orca_sessions(sessions_response)
+            session = select_orca_daemon_session(
+                sessions,
+                preferred_session_id=preferred_session_id,
+            )
+            if session is None:
+                candidates = format_orca_session_candidates(sessions)
+                write_log(
+                    "Orca daemon send skipped: no unambiguous live terminal session found"
+                    f"; candidates={candidates}",
+                    log_path,
+                )
+                return False
+
+            session_id = get_orca_session_id(session)
+            if not session_id:
+                write_log("Orca daemon send skipped: selected session has no id", log_path)
+                return False
+
+            write_orca_daemon_frame(
+                stream,
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "write",
+                    "payload": {
+                        "sessionId": session_id,
+                        "data": build_orca_bracketed_paste(text),
+                    },
+                },
+            )
+            write_response = read_orca_daemon_frame(stream)
+            if write_response.get("ok") is not True:
+                write_log(f"Orca daemon write failed: {write_response}", log_path)
+                return False
+
+            cwd = session.get("cwd") or "unknown cwd"
+            write_log(f"Orca daemon write succeeded for session {session_id} cwd={cwd}", log_path)
+            return True
+    except (OSError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+        write_log(f"Orca daemon send failed: {exc}", log_path)
+    return False
+
+
+def resolve_orca_daemon_paths(daemon_dir: Optional[Path] = None) -> Optional[Tuple[Path, Path, int]]:
+    search_dir = daemon_dir or Path.home() / ".config" / "orca" / "daemon"
+    if not search_dir.exists():
+        return None
+
+    sockets = sorted(
+        search_dir.glob("daemon-v*.sock"),
+        key=parse_orca_daemon_version,
+        reverse=True,
+    )
+    for socket_path in sockets:
+        token_path = socket_path.with_suffix(".token")
+        if token_path.exists():
+            return socket_path, token_path, parse_orca_daemon_version(socket_path)
+    return None
+
+
+def parse_orca_daemon_version(path: Path) -> int:
+    try:
+        return int(path.stem.rsplit("v", maxsplit=1)[1])
+    except (IndexError, ValueError):
+        return ORCA_DAEMON_PROTOCOL_VERSION
+
+
+def write_orca_daemon_frame(stream, message: dict[str, object]) -> None:
+    stream.write(json.dumps(message).encode("utf-8") + b"\n")
+    stream.flush()
+
+
+def read_orca_daemon_frame(stream) -> dict[str, object]:
+    line = stream.readline()
+    if not line:
+        raise RuntimeError("Orca daemon closed the connection")
+    response = json.loads(line.decode("utf-8"))
+    if not isinstance(response, dict):
+        raise RuntimeError(f"Orca daemon returned a non-object frame: {response!r}")
+    return response
+
+
+def extract_orca_sessions(response: dict[str, object]) -> list[dict[str, object]]:
+    payload = response.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    sessions = payload.get("sessions")
+    if not isinstance(sessions, list):
+        return []
+    return [session for session in sessions if isinstance(session, dict)]
+
+
+def select_orca_daemon_session(
+    sessions: list[dict[str, object]],
+    *,
+    preferred_session_id: Optional[str] = None,
+) -> Optional[dict[str, object]]:
+    if preferred_session_id:
+        return next(
+            (
+                session
+                for session in sessions
+                if (
+                    is_live_orca_session(session)
+                    and get_orca_session_id(session) == preferred_session_id
+                )
+            ),
+            None,
+        )
+
+    live_sessions = [session for session in sessions if is_live_orca_session(session)]
+    if len(live_sessions) == 1:
+        return live_sessions[0]
+
+    codex_sessions = [
+        session
+        for session in live_sessions
+        if (pid := parse_positive_int(session.get("pid"))) is not None
+        and process_tree_contains(pid, "codex")
+    ]
+    if len(codex_sessions) == 1:
+        return codex_sessions[0]
+    return None
+
+
+def is_live_orca_session(session: dict[str, object]) -> bool:
+    state = session.get("state")
+    is_alive = session.get("isAlive")
+    return is_alive is not False and state in (None, "", "running")
+
+
+def get_orca_session_id(session: dict[str, object]) -> str:
+    return str(session.get("sessionId") or session.get("id") or "")
+
+
+def format_orca_session_candidates(sessions: list[dict[str, object]]) -> str:
+    live_sessions = [session for session in sessions if is_live_orca_session(session)]
+    if not live_sessions:
+        return "none"
+    formatted = []
+    for session in live_sessions:
+        formatted.append(
+            "id="
+            f"{get_orca_session_id(session) or 'unknown'} "
+            f"pid={session.get('pid') or 'unknown'} "
+            f"cwd={session.get('cwd') or 'unknown'}"
+        )
+    return "; ".join(formatted)
+
+
+def parse_positive_int(value: object) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def process_tree_contains(root_pid: int, needle: str) -> bool:
+    try:
+        output = subprocess.check_output(
+            ["ps", "-eo", "pid=,ppid=,args="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+    rows: list[tuple[int, int, str]] = []
+    for line in output.splitlines():
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            continue
+        pid = parse_positive_int(parts[0])
+        parent_pid = parse_positive_int(parts[1])
+        if pid is None or parent_pid is None:
+            continue
+        rows.append((pid, parent_pid, parts[2] if len(parts) == 3 else ""))
+
+    needle_lower = needle.lower()
+    descendant_pids = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent_pid, _args in rows:
+            if parent_pid in descendant_pids and pid not in descendant_pids:
+                descendant_pids.add(pid)
+                changed = True
+
+    return any(pid in descendant_pids and needle_lower in args.lower() for pid, _parent, args in rows)
+
+
+def build_orca_bracketed_paste(text: str) -> str:
+    return f"{ORCA_BRACKETED_PASTE_START}{text}{ORCA_BRACKETED_PASTE_END}"
 
 
 def play_completion_beep(log_path: Path) -> None:
