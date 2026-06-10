@@ -59,6 +59,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--orca-daemon-dir", type=Path, default=None, help="Override Orca daemon directory.")
     parser.add_argument("--orca-session-id", default=None, help="Target one Orca daemon terminal session.")
     parser.add_argument("--disable-complete-beep", action="store_true", help="Disable post-paste completion beep.")
+    parser.add_argument(
+        "--no-hotkey-shield",
+        action="store_true",
+        help="Do not grab the hotkey; focused apps will also see Right Alt (Electron apps open their menu).",
+    )
     return parser
 
 
@@ -72,7 +77,9 @@ ORCA_BRACKETED_PASTE_START = "\x1b[200~"
 ORCA_DAEMON_PROTOCOL_VERSION = 10
 ORCA_DAEMON_TIMEOUT_SECONDS = 2.0
 DEFAULT_ORCA_STATE_PATH = Path.home() / ".config" / "orca" / "orca-data.json"
-CLIPBOARD_PASTE_SETTLE_SECONDS = 0.25
+# Electron may read the clipboard well after the paste keystroke arrives;
+# restoring the previous clipboard too early pastes stale content instead.
+CLIPBOARD_PASTE_SETTLE_SECONDS = 1.0
 
 
 class InjectionMode(str, Enum):
@@ -193,6 +200,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         enable_audio_mute=not args.no_audio_mute,
         exit_on_esc=args.exit_on_esc,
         on_exit=lambda: request_shutdown(signal.SIGTERM),
+        enable_hotkey_shield=not args.no_hotkey_shield,
     )
 
     def request_shutdown(signum: int) -> None:
@@ -550,13 +558,17 @@ def read_process_args(pid: Optional[int]) -> str:
 
 
 def is_orca_window(window: ActiveWindowInfo) -> bool:
-    haystack = " ".join([*window.wm_classes, window.name, window.process_args]).lower()
-    return "orca" in haystack
+    return "orca" in app_identity_haystack(window)
 
 
 def is_warp_window(window: ActiveWindowInfo) -> bool:
-    haystack = " ".join([*window.wm_classes, window.name, window.process_args]).lower()
-    return "warp" in haystack
+    return "warp" in app_identity_haystack(window)
+
+
+def app_identity_haystack(window: ActiveWindowInfo) -> str:
+    # Window titles carry arbitrary user content (tab names, document text),
+    # so app detection must rely on WM_CLASS and the owning process only.
+    return " ".join([*window.wm_classes, window.process_args]).lower()
 
 
 def describe_active_window(window: ActiveWindowInfo) -> str:

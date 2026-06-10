@@ -490,3 +490,60 @@ def test_send_text_to_orca_daemon_writes_expected_frames(tmp_path, monkeypatch):
         "sessionId": "session-1",
         "data": "\x1b[200~hello\x1b[201~",
     }
+
+
+def test_window_matching_ignores_window_title():
+    warp_window_titled_orca = main_mod.ActiveWindowInfo(
+        window_id="789",
+        wm_classes=("dev.warp.Warp", "dev.warp.Warp"),
+        name="Debug voice-to-text integration with Orca terminal",
+        pid=26709,
+        process_args="warp-terminal",
+    )
+
+    assert main_mod.is_orca_window(warp_window_titled_orca) is False
+    assert main_mod.is_warp_window(warp_window_titled_orca) is True
+
+    orca_window_titled_warp = main_mod.ActiveWindowInfo(
+        window_id="790",
+        wm_classes=("orca", "Orca"),
+        name="Researching the Warp terminal",
+        pid=8377,
+        process_args="orca-ide",
+    )
+
+    assert main_mod.is_orca_window(orca_window_titled_warp) is True
+    assert main_mod.is_warp_window(orca_window_titled_warp) is False
+
+
+def test_auto_injection_uses_xdotool_for_warp_window_titled_orca(tmp_path, monkeypatch):
+    calls = []
+
+    def fail_paste(*_args, **_kwargs):
+        raise AssertionError("Warp window must not use Orca clipboard paste")
+
+    monkeypatch.setattr(
+        main_mod,
+        "get_active_window_info",
+        lambda *_args: main_mod.ActiveWindowInfo(
+            window_id="789",
+            wm_classes=("dev.warp.Warp", "dev.warp.Warp"),
+            name="Debug voice-to-text integration with Orca terminal",
+            pid=26709,
+            process_args="warp-terminal",
+        ),
+    )
+    monkeypatch.setattr(main_mod, "type_text_with_xdotool", lambda *args: calls.append(args) or True)
+    monkeypatch.setattr(main_mod, "paste_text_with_clipboard_shortcut", fail_paste)
+    monkeypatch.setattr(main_mod, "send_text_to_orca_daemon", fail_paste)
+
+    delivered = main_mod.inject_text(
+        "hello warp",
+        Path("/usr/bin/xdotool"),
+        tmp_path / "log.txt",
+        enable_beep=False,
+        injection_mode=main_mod.InjectionMode.AUTO,
+    )
+
+    assert delivered is True
+    assert calls and calls[0][0] == "hello warp"
