@@ -12,6 +12,7 @@ from pynput import keyboard
 
 from .log_utils import write_log
 from .recorder import Recorder, RecorderStartError, RecorderStats
+from .x11_key_shield import X11KeyShield
 
 
 class AudioMuteError(Exception):
@@ -171,6 +172,7 @@ class PushToTalkHotkey:
         enable_audio_mute: bool = True,
         exit_on_esc: bool = True,
         on_exit: Callable[[], None] | None = None,
+        enable_hotkey_shield: bool = True,
     ) -> None:
         self._recorder = recorder
         self._silence_timeout = silence_timeout
@@ -179,6 +181,7 @@ class PushToTalkHotkey:
         self._exit_on_esc = exit_on_esc
         self._on_exit = on_exit
         self._mute_controller = AudioMuteController(log_path) if enable_audio_mute else None
+        self._hotkey_shield = X11KeyShield("Alt_R", log_path) if enable_hotkey_shield else None
 
         self._listener: keyboard.Listener | None = None
         self._active = False
@@ -188,6 +191,8 @@ class PushToTalkHotkey:
         """Begin listening for hotkey events."""
         if self._listener:
             return
+        if self._hotkey_shield:
+            self._hotkey_shield.start()
         self._listener = keyboard.Listener(
             on_press=self._handle_press,
             on_release=self._handle_release,
@@ -202,6 +207,8 @@ class PushToTalkHotkey:
             if self._listener:
                 self._listener.stop()
                 self._listener = None
+        if self._hotkey_shield:
+            self._hotkey_shield.stop()
         self._restore_audio()
         write_log("Hotkey listener stopped", self._log_path)
 
