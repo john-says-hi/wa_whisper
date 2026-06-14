@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from wa_whisper.dictation_archive import DictationArchive
+from wa_whisper.recovery_queue import RecoveryQueueResult
 from wa_whisper.whisper_backend import WhisperResult
 
 main_mod = importlib.import_module("wa_whisper.main")
@@ -29,16 +30,17 @@ class FakeBackend:
         return WhisperResult(text=self.text, segments=[], info={"duration": 1.5})
 
 
-def test_process_capture_archives_audio_transcript_and_copies_clipboard(tmp_path, monkeypatch):
+def test_process_capture_archives_audio_transcript_and_queues_copyq_recovery(tmp_path, monkeypatch):
     audio_path = write_audio(tmp_path)
     archive = DictationArchive(root=tmp_path / "archive")
-    clipboard_calls = []
+    recovery_queue_calls = []
     injection_calls = []
 
     monkeypatch.setattr(
         main_mod,
-        "copy_text_to_clipboard",
-        lambda text, log_path: clipboard_calls.append((text, log_path)) or True,
+        "insert_transcript_into_recovery_queue",
+        lambda text, log_path: recovery_queue_calls.append((text, log_path))
+        or RecoveryQueueResult(provider="copyq", inserted=True, row=1),
     )
     monkeypatch.setattr(
         main_mod,
@@ -71,12 +73,13 @@ def test_process_capture_archives_audio_transcript_and_copies_clipboard(tmp_path
     assert (record_dir / "transcript.txt").read_text(encoding="utf-8") == "hello world"
     assert (archive.latest_dir / "audio.wav").read_bytes() == b"audio bytes"
     assert (archive.latest_dir / "transcript.txt").read_text(encoding="utf-8") == "hello world"
-    assert clipboard_calls == [("hello world", tmp_path / "log.txt")]
+    assert recovery_queue_calls == [("hello world", tmp_path / "log.txt")]
     assert injection_calls == ["hello world"]
 
     data = read_json(metadata)
     assert data["status"] == "injected"
-    assert data["clipboard"] == {"copied": True}
+    assert data["clipboard"] == {"active_clipboard_modified": False}
+    assert data["recovery_queue"] == {"provider": "copyq", "inserted": True, "row": 1}
     assert data["injection"] == {"mode": "auto", "succeeded": True}
     assert data["backend"]["compute_mode"] == "ram"
 
@@ -85,7 +88,11 @@ def test_process_capture_preserves_transcript_when_injection_reports_failure(tmp
     audio_path = write_audio(tmp_path)
     archive = DictationArchive(root=tmp_path / "archive")
 
-    monkeypatch.setattr(main_mod, "copy_text_to_clipboard", lambda *_args: True)
+    monkeypatch.setattr(
+        main_mod,
+        "insert_transcript_into_recovery_queue",
+        lambda *_args: RecoveryQueueResult(provider="copyq", inserted=True, row=1),
+    )
     monkeypatch.setattr(main_mod, "inject_text", lambda *_args, **_kwargs: False)
 
     main_mod.process_capture(
@@ -108,7 +115,8 @@ def test_process_capture_preserves_transcript_when_injection_reports_failure(tmp
 
     metadata = read_json(only_archived_metadata(tmp_path / "archive"))
     assert metadata["status"] == "injection_failed"
-    assert metadata["clipboard"] == {"copied": True}
+    assert metadata["clipboard"] == {"active_clipboard_modified": False}
+    assert metadata["recovery_queue"] == {"provider": "copyq", "inserted": True, "row": 1}
     assert metadata["injection"] == {"mode": "xdotool-type", "succeeded": False}
     assert (archive.latest_dir / "transcript.txt").read_text(encoding="utf-8") == "important dictation"
 
@@ -118,9 +126,9 @@ def test_process_capture_archives_audio_when_transcription_fails(tmp_path, monke
     archive = DictationArchive(root=tmp_path / "archive")
 
     def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("clipboard and injection should not run after transcription failure")
+        raise AssertionError("recovery queue and injection should not run after transcription failure")
 
-    monkeypatch.setattr(main_mod, "copy_text_to_clipboard", fail_if_called)
+    monkeypatch.setattr(main_mod, "insert_transcript_into_recovery_queue", fail_if_called)
     monkeypatch.setattr(main_mod, "inject_text", fail_if_called)
 
     main_mod.process_capture(

@@ -84,8 +84,8 @@ Each timestamped record contains:
 
 - `audio.wav`: the original recorder output.
 - `transcript.txt`: the final post-processed transcript when Whisper produced text.
-- `metadata.json`: capture stats, backend mode/device details, clipboard status, injection status,
-  and error details when processing failed.
+- `metadata.json`: capture stats, backend mode/device details, CopyQ recovery queue status,
+  injection status, and error details when processing failed.
 
 The latest recovery files are also copied to:
 
@@ -95,12 +95,14 @@ The latest recovery files are also copied to:
 ~/.local/share/wa_whisper/dictations/latest/metadata.json
 ```
 
-After every successful transcription, `wa_whisper` leaves the final transcript on the clipboard in both
-`gpu` and `ram` modes. This intentionally replaces the previous clipboard contents so you can paste the
-latest dictation manually if automatic insertion missed the target.
+After every successful transcription, `wa_whisper` tries to insert the final transcript into CopyQ
+history row `1` in both `gpu` and `ram` modes. This preserves the active clipboard item at row `0`, so
+normal paste keeps using whatever you already had copied while the latest dictation stays nearby in
+CopyQ. If CopyQ is unavailable, the archive still keeps the latest transcript on disk.
 
 Records are retained for 90 days and pruned automatically at startup and after captures. Audio and
-transcripts are stored as local plaintext files, so treat this directory as sensitive.
+transcripts are stored as local plaintext files, and CopyQ also stores transcript text, so treat both as
+sensitive.
 
 ## Text Injection Modes
 

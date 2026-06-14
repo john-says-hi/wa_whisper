@@ -24,6 +24,7 @@ from .dictation_archive import DictationArchive, DictationRecord
 from .hotkeys import PushToTalkHotkey
 from .log_utils import DEFAULT_LOG_PATH, ensure_log_path, write_log
 from .recorder import Recorder, RecorderStats
+from .recovery_queue import insert_transcript_into_recovery_queue, skipped_recovery_queue_result
 from .text_postprocess import postprocess_text
 from .voice_isolation import VoiceIsolationPipeline
 from .whisper_backend import DEFAULT_MODEL_CACHE, WhisperBackend, WhisperConfig
@@ -298,6 +299,7 @@ def process_capture(
             append_space=append_space,
         )
         if not text.strip():
+            recovery_queue_result = skipped_recovery_queue_result()
             update_dictation_archive_record(
                 archive,
                 archive_record,
@@ -307,7 +309,8 @@ def process_capture(
                     "text_chars": 0,
                     "whisper_info": result.info,
                 },
-                clipboard={"copied": False},
+                clipboard=recovery_queue_result.clipboard_metadata(),
+                recovery_queue=recovery_queue_result.recovery_queue_metadata(),
                 injection={"mode": injection_mode.value, "succeeded": None},
             )
             write_log("No text produced from transcription", log_path)
@@ -319,7 +322,7 @@ def process_capture(
             whisper_info=result.info,
             log_path=log_path,
         )
-        clipboard_copied = copy_text_to_clipboard(text, log_path)
+        recovery_queue_result = insert_transcript_into_recovery_queue(text, log_path)
         injected = inject_text(
             text,
             xdotool_bin,
@@ -334,7 +337,8 @@ def process_capture(
             archive_record,
             log_path,
             status="injected" if injected else "injection_failed",
-            clipboard={"copied": clipboard_copied},
+            clipboard=recovery_queue_result.clipboard_metadata(),
+            recovery_queue=recovery_queue_result.recovery_queue_metadata(),
             injection={"mode": injection_mode.value, "succeeded": injected},
         )
         if injected:
@@ -571,24 +575,6 @@ def paste_text_with_clipboard_shortcut(
     if not restored:
         write_log("Clipboard paste warning: previous clipboard restore failed", log_path)
     return delivered
-
-
-def copy_text_to_clipboard(
-    text: str,
-    log_path: Path,
-    *,
-    clipboard_bin: Optional[Path] = None,
-) -> bool:
-    xclip_bin = clipboard_bin or resolve_xclip_path()
-    if xclip_bin is None:
-        write_log("Transcript clipboard copy failed: xclip not found", log_path)
-        return False
-    copied = write_xclip_clipboard(xclip_bin, text.encode("utf-8"), log_path)
-    if copied:
-        write_log("Transcript copied to clipboard", log_path)
-    else:
-        write_log("Transcript clipboard copy failed", log_path)
-    return copied
 
 
 def resolve_xclip_path() -> Optional[Path]:
