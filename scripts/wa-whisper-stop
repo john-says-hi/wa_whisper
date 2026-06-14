@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-pkill -f "wa-whisper" || true
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+pkill -f "$ROOT_DIR/.venv/bin/wa-whisper" || true
