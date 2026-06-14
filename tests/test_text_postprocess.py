@@ -41,3 +41,7 @@ def test_curly_apostrophe_phrase_is_removed() -> None:
 def test_single_sentence_without_period_is_unchanged() -> None:
     text = "One sentence only"
     assert postprocess_text(text, ensure_punctuation=False) == "One sentence only"
+
+
+def test_blank_text_does_not_turn_into_a_space() -> None:
+    assert postprocess_text("", append_space=True) == ""

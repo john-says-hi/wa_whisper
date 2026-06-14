@@ -6,6 +6,8 @@ import contextlib
 import math
 import os
 import queue
+import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -107,6 +109,11 @@ class Recorder:
 
         self._lock = threading.Lock()
         self._last_stats: RecorderStats | None = None
+        self._resolved_input_device: int | None = None
+        self._resolved_input_channels = 1
+        self._resolved_input_name = "default"
+        self._resolved_input_sample_rate = float(sample_rate)
+        self._channel_selection_logged = False
 
     def start(self) -> Path:
         """Begin recording and return the output WAV path."""
@@ -129,10 +136,20 @@ class Recorder:
 
             stream: sd.InputStream | None = None
             try:
+                (
+                    self._resolved_input_device,
+                    self._resolved_input_channels,
+                    self._resolved_input_name,
+                    self._resolved_input_sample_rate,
+                ) = self._resolve_input_stream()
+                with self._lock:
+                    # Reset state so we always begin from a clean queue.
+                    self._queue = queue.Queue()
+                    self._prepare_writer()
                 stream = sd.InputStream(
-                    samplerate=self.sample_rate,
-                    device=self.device_index,
-                    channels=1,
+                    samplerate=self._resolved_input_sample_rate,
+                    device=self._resolved_input_device,
+                    channels=self._resolved_input_channels,
                     dtype="float32",
                     callback=audio_callback,
                 )
@@ -153,6 +170,14 @@ class Recorder:
 
                 self._worker = threading.Thread(target=self._drain_queue, daemon=True)
                 self._worker.start()
+                write_log(
+                    "Recorder using input "
+                    f"{self._resolved_input_name} "
+                    "(device="
+                    f"{self._resolved_input_device}, channels={self._resolved_input_channels}, "
+                    f"sample_rate={self._resolved_input_sample_rate:.0f})",
+                    self.log_path,
+                )
                 write_log(f"Recorder started -> {self._file}", self.log_path)
                 return self._file
 
@@ -210,6 +235,7 @@ class Recorder:
         self._max_speech_streak_ms = 0.0
         self._current_speech_streak_ms = 0.0
         self._last_stats = None
+        self._channel_selection_logged = False
 
     def _drain_queue(self) -> None:
         while self._running or not self._queue.empty():
@@ -223,15 +249,230 @@ class Recorder:
             self._accumulate_stats(processed)
 
     def _prepare_block(self, block: np.ndarray) -> np.ndarray:
+        block = self._collapse_to_mono(block)
         if self.preamp != 1.0:
             block = np.clip(block * self.preamp, -1.0, 1.0)
         return block
+
+    def _collapse_to_mono(self, block: np.ndarray) -> np.ndarray:
+        channel_count = self._block_channel_count(block)
+        if channel_count <= 1:
+            if getattr(block, "ndim", 1) == 1 and hasattr(block, "reshape"):
+                return block.reshape(-1, 1)
+            if getattr(block, "ndim", 1) == 1:
+                return [[sample] for sample in block]  # pragma: no cover - test shim
+            return block
+
+        selected_channel = 0
+        selected_rms = -1.0
+        for channel_index in range(channel_count):
+            rms = self._channel_rms(block, channel_index)
+            if rms > selected_rms:
+                selected_channel = channel_index
+                selected_rms = rms
+
+        if not self._channel_selection_logged:
+            write_log(
+                f"Recorder collapsing {channel_count} channels to mono via channel {selected_channel + 1}",
+                self.log_path,
+            )
+            self._channel_selection_logged = True
+
+        if hasattr(block, "shape"):
+            return block[:, selected_channel : selected_channel + 1]
+        return [[frame[selected_channel]] for frame in block]  # pragma: no cover - test shim
+
+    def _block_channel_count(self, block: np.ndarray) -> int:
+        shape = getattr(block, "shape", None)
+        if shape is not None:
+            if len(shape) < 2:
+                return 1
+            return int(shape[1])
+        if not block:
+            return 0
+        first_frame = block[0]
+        if isinstance(first_frame, (list, tuple)):
+            return len(first_frame)
+        return 1
+
+    def _channel_rms(self, block: np.ndarray, channel_index: int) -> float:
+        total = 0.0
+        frame_count = 0
+        for frame in block:
+            sample = frame[channel_index]
+            total += float(sample) * float(sample)
+            frame_count += 1
+        if frame_count <= 0:
+            return 0.0
+        return math.sqrt(total / frame_count)
+
+    def _resolve_input_stream(self) -> tuple[int | None, int, str, float]:
+        resolved_device = self.device_index
+        if resolved_device is None:
+            resolved_device = self._resolve_linux_default_input_device()
+
+        device_info = self._query_device_info(resolved_device)
+        if not device_info:
+            return resolved_device, 1, "default", float(self.sample_rate)
+
+        channel_count = int(device_info.get("max_input_channels", 1) or 1)
+        channel_count = max(1, channel_count)
+        device_name = str(device_info.get("name") or resolved_device or "default")
+        sample_rate = self._resolve_supported_sample_rate(
+            resolved_device=resolved_device,
+            device_name=device_name,
+            channel_count=channel_count,
+            device_info=device_info,
+        )
+        return resolved_device, channel_count, device_name, sample_rate
+
+    def _resolve_supported_sample_rate(
+        self,
+        *,
+        resolved_device: int | None,
+        device_name: str,
+        channel_count: int,
+        device_info: dict,
+    ) -> float:
+        requested_sample_rate = float(self.sample_rate)
+        if self._supports_input_settings(
+            resolved_device=resolved_device,
+            sample_rate=requested_sample_rate,
+            channel_count=channel_count,
+        ):
+            return requested_sample_rate
+
+        for fallback_sample_rate in self._candidate_sample_rates(
+            requested_sample_rate=requested_sample_rate,
+            device_info=device_info,
+        ):
+            if self._supports_input_settings(
+                resolved_device=resolved_device,
+                sample_rate=fallback_sample_rate,
+                channel_count=channel_count,
+            ):
+                write_log(
+                    f"Recorder sample rate fallback for {device_name}: "
+                    f"{requested_sample_rate:.0f} -> {fallback_sample_rate:.0f}",
+                    self.log_path,
+                )
+                return fallback_sample_rate
+
+        return requested_sample_rate
+
+    def _candidate_sample_rates(
+        self,
+        *,
+        requested_sample_rate: float,
+        device_info: dict,
+    ) -> list[float]:
+        device_default = float(
+            device_info.get("default_samplerate", requested_sample_rate) or requested_sample_rate,
+        )
+        candidates = [
+            device_default,
+            44_100.0,
+            48_000.0,
+            32_000.0,
+            22_050.0,
+            16_000.0,
+            96_000.0,
+        ]
+        return [
+            candidate
+            for index, candidate in enumerate(candidates)
+            if candidate != requested_sample_rate and candidate not in candidates[:index]
+        ]
+
+    def _supports_input_settings(
+        self,
+        *,
+        resolved_device: int | None,
+        sample_rate: float,
+        channel_count: int,
+    ) -> bool:
+        try:
+            sd.check_input_settings(
+                device=resolved_device,
+                samplerate=sample_rate,
+                channels=channel_count,
+                dtype="float32",
+            )
+        except Exception:
+            return False
+        return True
+
+    def _query_device_info(self, device_index: int | None) -> dict | None:
+        try:
+            if device_index is None:
+                return sd.query_devices(None, "input")
+            return sd.query_devices(device_index)
+        except Exception:  # pragma: no cover - defensive guard for unavailable hosts
+            return None
+
+    def _resolve_linux_default_input_device(self) -> int | None:
+        default_source_description = self._read_default_source_description()
+        if not default_source_description:
+            return None
+
+        normalized_target = self._normalize_device_label(default_source_description)
+        try:
+            devices = sd.query_devices()
+        except Exception:  # pragma: no cover - defensive guard for unavailable hosts
+            return None
+
+        for device_index, device in enumerate(devices):
+            max_input_channels = int(device.get("max_input_channels", 0) or 0)
+            if max_input_channels <= 0:
+                continue
+            device_name = str(device.get("name") or "")
+            normalized_name = self._normalize_device_label(device_name)
+            if not normalized_name:
+                continue
+            if normalized_name == normalized_target or normalized_target in normalized_name:
+                return device_index
+        return None
+
+    def _read_default_source_description(self) -> str | None:
+        try:
+            pactl_info = subprocess.check_output(["pactl", "info"], text=True)
+            pactl_sources = subprocess.check_output(["pactl", "list", "sources"], text=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return None
+
+        default_source_name: str | None = None
+        for line in pactl_info.splitlines():
+            if line.startswith("Default Source:"):
+                default_source_name = line.split(":", 1)[1].strip()
+                break
+
+        if not default_source_name:
+            return None
+
+        descriptions = self._parse_source_descriptions(pactl_sources)
+        return descriptions.get(default_source_name)
+
+    def _parse_source_descriptions(self, pactl_sources: str) -> dict[str, str]:
+        descriptions: dict[str, str] = {}
+        current_name: str | None = None
+        for line in pactl_sources.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Name:"):
+                current_name = stripped.split(":", 1)[1].strip()
+                continue
+            if stripped.startswith("Description:") and current_name:
+                descriptions[current_name] = stripped.split(":", 1)[1].strip()
+                current_name = None
+        return descriptions
+
+    def _normalize_device_label(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", value.lower())
 
     def _accumulate_stats(self, block: np.ndarray) -> None:
         frames = int(block.shape[0]) if block.ndim > 0 else 0
         if frames <= 0:
             return
-        block_ms = (frames / self.sample_rate) * 1000.0
+        block_ms = (frames / self._resolved_input_sample_rate) * 1000.0
         rms = float(np.sqrt(np.mean(np.square(block), dtype=np.float64)))
 
         with self._lock:
@@ -281,7 +522,7 @@ class Recorder:
         self._writer = sf.SoundFile(
             str(self._file),
             mode="w",
-            samplerate=self.sample_rate,
+            samplerate=int(self._resolved_input_sample_rate),
             channels=1,
             subtype="PCM_16",
         )

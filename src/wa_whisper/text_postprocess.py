@@ -135,7 +135,7 @@ def postprocess_text(
     if ensure_punctuation:
         working = ensure_sentence_final_punctuation(working)
     working = lowercase_single_sentence(working, reference=reference_before_punct)
-    if append_space:
+    if append_space and working:
         working = f"{working} "
     return working
 

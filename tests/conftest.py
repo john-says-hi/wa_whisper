@@ -85,6 +85,20 @@ class _DummyStream:
 
 sd_module.PortAudioError = _PortAudioError
 sd_module.InputStream = _DummyStream
+sd_module.default = types.SimpleNamespace(device=[0, 0])
+
+
+def _query_devices(device=None, *args, **_kwargs):
+    devices = [{"name": "default", "max_input_channels": 1}]
+    if args:
+        return devices[0]
+    if device is None:
+        return devices
+    return devices[device]
+
+
+sd_module.query_devices = _query_devices
+sd_module.check_input_settings = lambda *args, **kwargs: None
 
 sys.modules.setdefault("sounddevice", sd_module)
 
