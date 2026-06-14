@@ -310,6 +310,37 @@ def test_clipboard_paste_shortcut_restores_previous_clipboard(tmp_path, monkeypa
     assert calls[3][1]["input"] == b"old clipboard"
 
 
+def test_copy_text_to_clipboard_leaves_transcript_on_clipboard(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"")
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+
+    copied = main_mod.copy_text_to_clipboard(
+        "final transcript",
+        tmp_path / "log.txt",
+        clipboard_bin=Path("/usr/bin/xclip"),
+    )
+
+    assert copied is True
+    assert calls == [
+        (
+            ["/usr/bin/xclip", "-selection", "clipboard", "-in"],
+            {
+                "input": b"final transcript",
+                "check": True,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "timeout": 1.0,
+            },
+        )
+    ]
+    assert "Transcript copied to clipboard" in (tmp_path / "log.txt").read_text(encoding="utf-8")
+
+
 def test_auto_injection_unknown_window_uses_xdotool(tmp_path, monkeypatch):
     calls = []
 

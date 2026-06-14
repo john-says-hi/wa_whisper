@@ -92,6 +92,17 @@ class WhisperBackend:
             return
         write_log(f"Whisper device {self._device} fp16={self._fp16}", self._log_path)
 
+    def archive_metadata(self) -> Dict[str, Any]:
+        """Return stable backend details for dictation recovery metadata."""
+        return {
+            "model_name": self._config.model_name,
+            "device": self._device,
+            "compute_mode": self._config.compute_mode,
+            "fp16": self._fp16,
+            "beam_size": self._config.beam_size,
+            "temperature": self._config.temperature,
+        }
+
     def load(self) -> None:
         """Load the Whisper model if it has not been loaded yet."""
         with self._lock:

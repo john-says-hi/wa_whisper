@@ -26,6 +26,7 @@ The prototype currently includes:
 - Background worker that runs Whisper `large-v3` with FP16 when CUDA is available.
 - Lightweight text post-processing (number/acronym normalization, punctuation fixes).
 - Optional desktop audio muting via `wpctl`/`pactl` and logging to `~/.cache/wa_whisper`.
+- Durable local recovery for each dictation's original audio and final transcript.
 - App-aware text injection: Warp and ordinary windows use the original `xdotool` typing path, while Orca terminals use Orca's daemon write path.
 - Placeholder voice isolation hook for upcoming DTLN integration.
 
@@ -66,6 +67,40 @@ Verification signs:
 - `nvidia-smi` should stop showing the `wa-whisper` Python process after switching to `ram`.
 - Switching back to `gpu` should restart the service and load the model back onto CUDA on the next
   transcription.
+
+## Dictation Recovery
+
+`wa_whisper` saves every completed capture locally before transcription starts. This protects long
+dictations if RAM-mode transcription takes a while, focus changes before text injection, or injection
+reports success but the text does not land where expected.
+
+Archived dictations live under:
+
+```bash
+~/.local/share/wa_whisper/dictations/
+```
+
+Each timestamped record contains:
+
+- `audio.wav`: the original recorder output.
+- `transcript.txt`: the final post-processed transcript when Whisper produced text.
+- `metadata.json`: capture stats, backend mode/device details, clipboard status, injection status,
+  and error details when processing failed.
+
+The latest recovery files are also copied to:
+
+```bash
+~/.local/share/wa_whisper/dictations/latest/audio.wav
+~/.local/share/wa_whisper/dictations/latest/transcript.txt
+~/.local/share/wa_whisper/dictations/latest/metadata.json
+```
+
+After every successful transcription, `wa_whisper` leaves the final transcript on the clipboard in both
+`gpu` and `ram` modes. This intentionally replaces the previous clipboard contents so you can paste the
+latest dictation manually if automatic insertion missed the target.
+
+Records are retained for 90 days and pruned automatically at startup and after captures. Audio and
+transcripts are stored as local plaintext files, so treat this directory as sensitive.
 
 ## Text Injection Modes
 

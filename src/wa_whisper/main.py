@@ -17,9 +17,10 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 from .compute_mode import ComputeModeError, compute_mode_values, resolve_compute_device
+from .dictation_archive import DictationArchive, DictationRecord
 from .hotkeys import PushToTalkHotkey
 from .log_utils import DEFAULT_LOG_PATH, ensure_log_path, write_log
 from .recorder import Recorder, RecorderStats
@@ -163,6 +164,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         if injection_mode in (InjectionMode.XDOTOOL_TYPE, InjectionMode.AUTO)
         else args.xdotool_path or Path("xdotool")
     )
+    archive = DictationArchive()
+    prune_dictation_archive(archive, log_path)
 
     task_queue: "queue.Queue[TaskItem]" = queue.Queue()
     stop_event = threading.Event()
@@ -194,6 +197,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                 injection_mode=injection_mode,
                 orca_daemon_dir=args.orca_daemon_dir,
                 orca_session_id=args.orca_session_id,
+                archive=archive,
             )
             task_queue.task_done()
 
@@ -262,6 +266,7 @@ def process_capture(
     injection_mode: InjectionMode,
     orca_daemon_dir: Optional[Path],
     orca_session_id: Optional[str],
+    archive: Optional[DictationArchive] = None,
 ) -> None:
     write_log(f"Processing capture {audio_path}", log_path)
     if stats:
@@ -273,6 +278,13 @@ def process_capture(
             f"silence={stats.silence_ms:.1f}ms ratio={ratio} max_db={max_db}",
             log_path,
         )
+    archive_record = start_dictation_archive_record(
+        archive,
+        audio_path,
+        stats=stats,
+        backend=backend_archive_metadata(backend),
+        log_path=log_path,
+    )
     enhanced_path = audio_path
     try:
         if voice_isolation:
@@ -286,8 +298,28 @@ def process_capture(
             append_space=append_space,
         )
         if not text.strip():
+            update_dictation_archive_record(
+                archive,
+                archive_record,
+                log_path,
+                status="no_text",
+                transcription={
+                    "text_chars": 0,
+                    "whisper_info": result.info,
+                },
+                clipboard={"copied": False},
+                injection={"mode": injection_mode.value, "succeeded": None},
+            )
             write_log("No text produced from transcription", log_path)
             return
+        save_dictation_archive_transcript(
+            archive,
+            archive_record,
+            text,
+            whisper_info=result.info,
+            log_path=log_path,
+        )
+        clipboard_copied = copy_text_to_clipboard(text, log_path)
         injected = inject_text(
             text,
             xdotool_bin,
@@ -297,16 +329,104 @@ def process_capture(
             orca_daemon_dir=orca_daemon_dir,
             orca_session_id=orca_session_id,
         )
+        update_dictation_archive_record(
+            archive,
+            archive_record,
+            log_path,
+            status="injected" if injected else "injection_failed",
+            clipboard={"copied": clipboard_copied},
+            injection={"mode": injection_mode.value, "succeeded": injected},
+        )
         if injected:
             write_log(f"Injected text: {text}", log_path)
         else:
             write_log(f"Text injection failed: {text}", log_path)
     except Exception as exc:  # pragma: no cover - defensive log
+        update_dictation_archive_record(
+            archive,
+            archive_record,
+            log_path,
+            status="processing_failed",
+            error=str(exc),
+        )
         write_log(f"Capture processing failed: {exc}", log_path)
     finally:
         if enhanced_path != audio_path and enhanced_path.exists():
             enhanced_path.unlink(missing_ok=True)
         audio_path.unlink(missing_ok=True)
+        if archive:
+            prune_dictation_archive(archive, log_path)
+
+
+def start_dictation_archive_record(
+    archive: Optional[DictationArchive],
+    audio_path: Path,
+    *,
+    stats: Optional[RecorderStats],
+    backend: Mapping[str, Any],
+    log_path: Path,
+) -> Optional[DictationRecord]:
+    if archive is None:
+        return None
+    try:
+        record = archive.start_record(audio_path, stats=stats, backend=backend)
+    except Exception as exc:
+        write_log(f"Dictation archive audio save failed: {exc}", log_path)
+        return None
+    write_log(f"Archived capture audio: {record.audio_path}", log_path)
+    return record
+
+
+def save_dictation_archive_transcript(
+    archive: Optional[DictationArchive],
+    record: Optional[DictationRecord],
+    text: str,
+    *,
+    whisper_info: Mapping[str, Any],
+    log_path: Path,
+) -> None:
+    if archive is None or record is None:
+        return
+    try:
+        archive.save_transcript(record, text, whisper_info=whisper_info)
+    except Exception as exc:
+        write_log(f"Dictation archive transcript save failed: {exc}", log_path)
+        return
+    write_log(f"Archived transcript: {record.transcript_path}", log_path)
+
+
+def update_dictation_archive_record(
+    archive: Optional[DictationArchive],
+    record: Optional[DictationRecord],
+    log_path: Path,
+    **updates: Any,
+) -> None:
+    if archive is None or record is None:
+        return
+    try:
+        archive.update_record(record, **updates)
+    except Exception as exc:
+        write_log(f"Dictation archive metadata update failed: {exc}", log_path)
+
+
+def prune_dictation_archive(archive: DictationArchive, log_path: Path) -> None:
+    try:
+        removed = archive.prune_expired()
+    except Exception as exc:
+        write_log(f"Dictation archive prune failed: {exc}", log_path)
+        return
+    if removed:
+        write_log(f"Dictation archive pruned {removed} expired record(s)", log_path)
+
+
+def backend_archive_metadata(backend: WhisperBackend) -> dict[str, Any]:
+    metadata = getattr(backend, "archive_metadata", None)
+    if not callable(metadata):
+        return {}
+    try:
+        return dict(metadata())
+    except Exception:
+        return {}
 
 
 def inject_text(
@@ -451,6 +571,24 @@ def paste_text_with_clipboard_shortcut(
     if not restored:
         write_log("Clipboard paste warning: previous clipboard restore failed", log_path)
     return delivered
+
+
+def copy_text_to_clipboard(
+    text: str,
+    log_path: Path,
+    *,
+    clipboard_bin: Optional[Path] = None,
+) -> bool:
+    xclip_bin = clipboard_bin or resolve_xclip_path()
+    if xclip_bin is None:
+        write_log("Transcript clipboard copy failed: xclip not found", log_path)
+        return False
+    copied = write_xclip_clipboard(xclip_bin, text.encode("utf-8"), log_path)
+    if copied:
+        write_log("Transcript copied to clipboard", log_path)
+    else:
+        write_log("Transcript clipboard copy failed", log_path)
+    return copied
 
 
 def resolve_xclip_path() -> Optional[Path]:
