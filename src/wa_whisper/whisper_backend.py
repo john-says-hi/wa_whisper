@@ -33,6 +33,8 @@ class WhisperConfig:
     condition_on_previous_text: bool = False
     cache_dir: Path = DEFAULT_MODEL_CACHE
     device: Optional[str] = None
+    compute_mode: Optional[str] = None
+    fp16: Optional[bool] = None
 
 
 @dataclass(slots=True)
@@ -64,15 +66,31 @@ class WhisperBackend:
         self._log_path = log_path
         self._model: whisper.Whisper | None = None
         self._device = self._resolve_device(config.device)
+        self._fp16 = config.fp16 if config.fp16 is not None else self._device != "cpu"
         self._lock = threading.Lock()
+        self._log_compute_selection()
 
     def _resolve_device(self, requested: Optional[str]) -> str:
         if requested:
+            if self._config.compute_mode == "gpu" and requested == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError(
+                    "gpu compute mode requires CUDA, but torch reports CUDA is unavailable. "
+                    "Run `wa-whisper-mode ram` to switch to CPU/system RAM mode.",
+                )
             return requested
         if torch.cuda.is_available():
             return "cuda"
         write_log("CUDA unavailable; falling back to CPU", self._log_path)
         return "cpu"
+
+    def _log_compute_selection(self) -> None:
+        if self._config.compute_mode:
+            write_log(
+                f"Whisper compute mode {self._config.compute_mode} -> device={self._device} fp16={self._fp16}",
+                self._log_path,
+            )
+            return
+        write_log(f"Whisper device {self._device} fp16={self._fp16}", self._log_path)
 
     def load(self) -> None:
         """Load the Whisper model if it has not been loaded yet."""
@@ -104,7 +122,7 @@ class WhisperBackend:
             "temperature": self._config.temperature,
             "compression_ratio_threshold": self._config.compression_ratio_threshold,
             "condition_on_previous_text": self._config.condition_on_previous_text,
-            "fp16": self._device != "cpu",
+            "fp16": self._fp16,
         }
         if self._config.patience is not None:
             kwargs["patience"] = self._config.patience

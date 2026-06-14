@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 main_mod = importlib.import_module("wa_whisper.main")
@@ -56,6 +58,17 @@ def test_parser_accepts_auto_injection_mode():
     args = main_mod.build_arg_parser().parse_args(["--injection-mode", "auto"])
 
     assert args.injection_mode == main_mod.InjectionMode.AUTO.value
+
+
+def test_parser_accepts_compute_mode():
+    args = main_mod.build_arg_parser().parse_args(["--compute-mode", "ram"])
+
+    assert args.compute_mode == "ram"
+
+
+def test_parser_rejects_device_and_compute_mode():
+    with pytest.raises(SystemExit):
+        main_mod.build_arg_parser().parse_args(["--device", "cpu", "--compute-mode", "ram"])
 
 
 def test_default_injection_uses_xdotool_type_and_beep(tmp_path, monkeypatch):

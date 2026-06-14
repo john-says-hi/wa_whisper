@@ -31,6 +31,42 @@ The prototype currently includes:
 
 Use `scripts/bootstrap.sh` to provision dependencies, then run `wa-whisper` inside an active terminal session. Press Right Alt to dictate; release to transcribe and inject text into the active window. Press `Ctrl+C` (or `Esc` when launched with `--exit-on-esc`) to exit.
 
+## Compute Modes
+
+`wa_whisper` has two restart-based compute modes:
+
+```bash
+wa-whisper-mode gpu
+wa-whisper-mode ram
+wa-whisper-mode status
+```
+
+`gpu` is the default when no mode file exists. It uses the existing OpenAI Whisper/PyTorch backend on
+CUDA with FP16 enabled. `ram` uses the same backend on CPU/system RAM with FP16 disabled. The selected
+mode is stored in `~/.config/wa_whisper/compute_mode`, then `wa-whisper-mode` restarts the user
+service so the old model process exits and releases VRAM.
+
+Manual runs can override the persisted mode without changing it:
+
+```bash
+wa-whisper --compute-mode ram
+wa-whisper --compute-mode gpu
+```
+
+The lower-level `--device cpu|cuda` flag still works for direct debugging, but it cannot be combined
+with `--compute-mode`.
+
+Expect `ram` mode to be much slower than the RTX CUDA path because inference runs on the CPU, not only
+from a different memory pool. Use it when freeing VRAM matters more than dictation latency.
+
+Verification signs:
+
+- `~/.cache/wa_whisper/service.log` contains `Whisper compute mode ram -> device=cpu fp16=False` or
+  `Whisper compute mode gpu -> device=cuda fp16=True`.
+- `nvidia-smi` should stop showing the `wa-whisper` Python process after switching to `ram`.
+- Switching back to `gpu` should restart the service and load the model back onto CUDA on the next
+  transcription.
+
 ## Text Injection Modes
 
 The default CLI mode is `xdotool-type`, which preserves the original behavior:

@@ -19,6 +19,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
 
+from .compute_mode import ComputeModeError, compute_mode_values, resolve_compute_device
 from .hotkeys import PushToTalkHotkey
 from .log_utils import DEFAULT_LOG_PATH, ensure_log_path, write_log
 from .recorder import Recorder, RecorderStats
@@ -45,7 +46,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-number-normalization", action="store_true", help="Skip number conversions.")
     parser.add_argument("--disable-acronym-normalization", action="store_true", help="Skip acronym conversions.")
     parser.add_argument("--disable-punctuation", action="store_true", help="Do not enforce sentence punctuation.")
-    parser.add_argument("--device", default=None, help="Force Whisper device (cuda/cpu).")
+    compute_group = parser.add_mutually_exclusive_group()
+    compute_group.add_argument("--device", default=None, help="Force Whisper device (cuda/cpu).")
+    compute_group.add_argument(
+        "--compute-mode",
+        choices=compute_mode_values(),
+        default=None,
+        help="Use a named compute mode for this run. Missing mode config defaults to gpu.",
+    )
     parser.add_argument("--model-cache", type=Path, default=None, help="Override Whisper model cache dir.")
     parser.add_argument("--exit-on-esc", action="store_true", default=False, help="Stop listener on ESC.")
     parser.add_argument("--no-voice-isolation", action="store_true", help="Disable placeholder voice isolation.")
@@ -120,6 +128,14 @@ def main(argv: Optional[list[str]] = None) -> None:
     log_path = ensure_log_path(args.log_path)
     write_log("wa_whisper starting", log_path)
 
+    try:
+        compute_settings = resolve_compute_device(
+            compute_mode_override=args.compute_mode,
+            device_override=args.device,
+        )
+    except ComputeModeError as exc:
+        parser.error(str(exc))
+
     config = WhisperConfig(
         model_name=args.model,
         beam_size=args.beam_size,
@@ -127,7 +143,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         temperature=args.temperature,
         initial_prompt=args.initial_prompt,
         cache_dir=args.model_cache or DEFAULT_MODEL_CACHE,
-        device=args.device,
+        device=compute_settings.device,
+        compute_mode=compute_settings.compute_mode.value if compute_settings.compute_mode else None,
+        fp16=compute_settings.fp16,
     )
 
     backend = WhisperBackend(config, log_path)
