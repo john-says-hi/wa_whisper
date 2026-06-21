@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -13,6 +14,9 @@ from pynput import keyboard
 from .log_utils import write_log
 from .recorder import Recorder, RecorderStartError, RecorderStats
 from .x11_key_shield import X11KeyShield
+
+
+DEFAULT_HOTKEY_REPRESS_GRACE_SECONDS = 1.0
 
 
 class AudioMuteError(Exception):
@@ -173,6 +177,7 @@ class PushToTalkHotkey:
         exit_on_esc: bool = True,
         on_exit: Callable[[], None] | None = None,
         enable_hotkey_shield: bool = True,
+        hotkey_repress_grace_seconds: float = DEFAULT_HOTKEY_REPRESS_GRACE_SECONDS,
     ) -> None:
         self._recorder = recorder
         self._silence_timeout = silence_timeout
@@ -182,9 +187,12 @@ class PushToTalkHotkey:
         self._on_exit = on_exit
         self._mute_controller = AudioMuteController(log_path) if enable_audio_mute else None
         self._hotkey_shield = X11KeyShield("Alt_R", log_path) if enable_hotkey_shield else None
+        self._hotkey_repress_grace_seconds = max(0.0, hotkey_repress_grace_seconds)
 
         self._listener: keyboard.Listener | None = None
         self._active = False
+        self._finalizing_capture = False
+        self._ignore_presses_until = 0.0
         self._lock = threading.RLock()
 
     def start(self) -> None:
@@ -219,6 +227,10 @@ class PushToTalkHotkey:
             with self._lock:
                 if self._active:
                     return
+                ignore_reason = self._ignored_press_reason(time.monotonic())
+                if ignore_reason:
+                    write_log(f"Right Alt press ignored {ignore_reason}", self._log_path)
+                    return
                 self._active = True
             self._mute_audio()
             try:
@@ -249,14 +261,28 @@ class PushToTalkHotkey:
             if not self._active:
                 return
             self._active = False
+            self._finalizing_capture = True
+            self._ignore_presses_until = time.monotonic() + self._hotkey_repress_grace_seconds
         threading.Thread(target=self._finalize_capture, daemon=True).start()
 
     def _finalize_capture(self) -> None:
-        result_path = self._recorder.stop(self._silence_timeout)
-        stats = self._recorder.last_capture_stats()
-        self._restore_audio()
-        write_log("Recording finalized", self._log_path)
-        self._on_capture_finished(result_path, stats)
+        try:
+            result_path = self._recorder.stop(self._silence_timeout)
+            stats = self._recorder.last_capture_stats()
+            self._restore_audio()
+            write_log("Recording finalized", self._log_path)
+            self._on_capture_finished(result_path, stats)
+        finally:
+            with self._lock:
+                self._finalizing_capture = False
+
+    def _ignored_press_reason(self, now: float) -> str | None:
+        if self._finalizing_capture:
+            return "during capture finalization"
+        remaining_grace_seconds = self._ignore_presses_until - now
+        if remaining_grace_seconds > 0:
+            return f"for {remaining_grace_seconds:.2f}s grace period"
+        return None
 
     def _mute_audio(self) -> None:
         if self._mute_controller:
