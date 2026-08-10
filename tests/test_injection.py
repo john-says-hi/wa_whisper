@@ -52,6 +52,7 @@ def test_parser_defaults_to_stable_xdotool_mode():
     args = main_mod.build_arg_parser().parse_args([])
 
     assert args.injection_mode == main_mod.InjectionMode.XDOTOOL_TYPE.value
+    assert args.input_channel is None
 
 
 def test_parser_accepts_auto_injection_mode():
@@ -69,6 +70,18 @@ def test_parser_accepts_compute_mode():
 def test_parser_rejects_device_and_compute_mode():
     with pytest.raises(SystemExit):
         main_mod.build_arg_parser().parse_args(["--device", "cpu", "--compute-mode", "ram"])
+
+
+def test_parser_accepts_one_based_input_channel():
+    args = main_mod.build_arg_parser().parse_args(["--input-channel", "1"])
+
+    assert args.input_channel == 1
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-a-number"])
+def test_parser_rejects_non_positive_input_channel(value):
+    with pytest.raises(SystemExit):
+        main_mod.build_arg_parser().parse_args(["--input-channel", value])
 
 
 def test_default_injection_uses_xdotool_type_and_beep(tmp_path, monkeypatch):

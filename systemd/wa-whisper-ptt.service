@@ -9,7 +9,7 @@ WorkingDirectory=%h/Documents/wa_whisper
 Environment=DISPLAY=:1
 Environment=XAUTHORITY=%h/.Xauthority
 ExecStartPre=/usr/bin/mkdir -p %h/.cache/wa_whisper
-ExecStart=%h/Documents/wa_whisper/scripts/wa-whisper-start --injection-mode auto
+ExecStart=%h/Documents/wa_whisper/scripts/wa-whisper-start --injection-mode auto --input-channel 1
 ExecStop=%h/Documents/wa_whisper/scripts/wa-whisper-stop
 Restart=on-failure
 RestartSec=5

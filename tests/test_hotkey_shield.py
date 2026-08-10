@@ -1,8 +1,11 @@
 import importlib
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -107,6 +110,22 @@ def test_shield_start_is_idempotent_while_active(monkeypatch, tmp_path):
     shield.stop()
 
 
+def test_shield_start_and_cleanup_ignore_unusable_log_path(monkeypatch, tmp_path):
+    display = FakeDisplay()
+    blocking_file = tmp_path / "not_a_directory"
+    blocking_file.write_text("blocked", encoding="utf-8")
+    monkeypatch.setattr(shield_mod, "load_xlib", lambda: make_fake_xlib(display))
+    shield = shield_mod.X11KeyShield("Alt_R", blocking_file / "runtime.log")
+
+    assert shield.start() is True
+    shield.stop()
+
+    assert shield.active is False
+    assert display.root.ungrab_calls == [(108, 1 << 15)]
+    assert display.closed is True
+    assert blocking_file.read_text(encoding="utf-8") == "blocked"
+
+
 def test_shield_disabled_when_keycode_missing(monkeypatch, tmp_path):
     display = FakeDisplay(keycode=0)
     monkeypatch.setattr(shield_mod, "load_xlib", lambda: make_fake_xlib(display))
@@ -192,3 +211,192 @@ def test_push_to_talk_can_disable_shield(monkeypatch, tmp_path):
 
     hotkey.start()
     hotkey.stop()
+
+
+def test_hotkey_stop_before_start_permanently_prevents_resource_start(monkeypatch, tmp_path):
+    listener_constructions = []
+    monkeypatch.setattr(hotkeys_mod, "X11KeyShield", FakeShield)
+    monkeypatch.setattr(
+        hotkeys_mod.keyboard,
+        "Listener",
+        lambda **kwargs: listener_constructions.append(kwargs),
+    )
+    hotkey = build_hotkey(tmp_path, enable_hotkey_shield=True)
+    shield = hotkey._hotkey_shield
+
+    hotkey.stop()
+
+    assert hotkey.start() is False
+    assert listener_constructions == []
+    assert shield.started is False
+    assert hotkey._listener is None
+
+
+def test_hotkey_reentrant_stop_during_start_cleans_late_shield(monkeypatch, tmp_path):
+    listener_constructions = []
+    hotkey = build_hotkey(tmp_path, enable_hotkey_shield=False)
+
+    class ReentrantStopShield(FakeShield):
+        def start(self):
+            self.started = True
+            hotkey.stop()
+            return True
+
+    shield = ReentrantStopShield("Alt_R", tmp_path / "log.txt")
+    hotkey._hotkey_shield = shield
+    monkeypatch.setattr(
+        hotkeys_mod.keyboard,
+        "Listener",
+        lambda **kwargs: listener_constructions.append(kwargs),
+    )
+
+    assert hotkey.start() is False
+    assert listener_constructions == []
+    assert shield.started is True
+    assert shield.stopped is True
+    assert hotkey._listener is None
+
+
+def test_hotkey_reentrant_stop_after_start_publication_cleans_resources(monkeypatch, tmp_path):
+    class TrackingListener:
+        def __init__(self, **_kwargs):
+            self.stopped = False
+
+        def start(self):
+            return self
+
+        def stop(self):
+            self.stopped = True
+
+    listeners = []
+
+    def listener_factory(**kwargs):
+        listener = TrackingListener(**kwargs)
+        listeners.append(listener)
+        return listener
+
+    monkeypatch.setattr(hotkeys_mod, "X11KeyShield", FakeShield)
+    monkeypatch.setattr(hotkeys_mod.keyboard, "Listener", listener_factory)
+    hotkey = build_hotkey(tmp_path, enable_hotkey_shield=True)
+    shield = hotkey._hotkey_shield
+    original_write_log = hotkeys_mod.write_log
+    shutdown_requested = False
+
+    def request_shutdown_from_start_log(message, log_path):
+        nonlocal shutdown_requested
+        if message.startswith("Hotkey listener started") and not shutdown_requested:
+            shutdown_requested = True
+            hotkey.stop()
+        original_write_log(message, log_path)
+
+    monkeypatch.setattr(hotkeys_mod, "write_log", request_shutdown_from_start_log)
+
+    assert hotkey.start() is False
+    assert shutdown_requested is True
+    assert listeners[0].stopped is True
+    assert shield.stopped is True
+    assert hotkey._listener is None
+    assert hotkey._events_enabled is False
+
+
+def test_hotkey_concurrent_start_and_stop_leave_resources_stopped(monkeypatch, tmp_path):
+    class BlockingShield(FakeShield):
+        def __init__(self, keysym_name, log_path):
+            super().__init__(keysym_name, log_path)
+            self.start_entered = threading.Event()
+            self.allow_start = threading.Event()
+
+        def start(self):
+            self.start_entered.set()
+            assert self.allow_start.wait(timeout=1.0)
+            self.started = True
+            return True
+
+    class TrackingListener:
+        def __init__(self, **_kwargs):
+            self.started = False
+            self.stopped = False
+
+        def start(self):
+            self.started = True
+            return self
+
+        def stop(self):
+            self.stopped = True
+
+    listeners = []
+
+    def listener_factory(**kwargs):
+        listener = TrackingListener(**kwargs)
+        listeners.append(listener)
+        return listener
+
+    monkeypatch.setattr(hotkeys_mod, "X11KeyShield", BlockingShield)
+    monkeypatch.setattr(hotkeys_mod.keyboard, "Listener", listener_factory)
+    hotkey = build_hotkey(tmp_path, enable_hotkey_shield=True)
+    shield = hotkey._hotkey_shield
+    start_results = []
+    stop_started = threading.Event()
+    stop_finished = threading.Event()
+
+    start_thread = threading.Thread(target=lambda: start_results.append(hotkey.start()))
+
+    def stop_hotkey():
+        stop_started.set()
+        hotkey.stop()
+        stop_finished.set()
+
+    stop_thread = threading.Thread(target=stop_hotkey)
+    start_thread.start()
+    assert shield.start_entered.wait(timeout=1.0)
+    stop_thread.start()
+    assert stop_started.wait(timeout=1.0)
+    assert stop_finished.is_set() is False
+
+    shield.allow_start.set()
+    start_thread.join(timeout=1.0)
+    stop_thread.join(timeout=1.0)
+
+    assert start_thread.is_alive() is False
+    assert stop_thread.is_alive() is False
+    assert start_results == [True]
+    assert len(listeners) == 1
+    assert listeners[0].started is True
+    assert listeners[0].stopped is True
+    assert shield.started is True
+    assert shield.stopped is True
+    assert hotkey._listener is None
+    assert hotkey._lifecycle_closed is True
+
+
+def test_hotkey_listener_start_failure_cleans_listener_and_shield(monkeypatch, tmp_path):
+    class FailingListener:
+        def __init__(self, **_kwargs):
+            self.stopped = False
+
+        def start(self):
+            raise RuntimeError("listener failed")
+
+        def stop(self):
+            self.stopped = True
+
+    listeners = []
+
+    def listener_factory(**kwargs):
+        listener = FailingListener(**kwargs)
+        listeners.append(listener)
+        return listener
+
+    monkeypatch.setattr(hotkeys_mod, "X11KeyShield", FakeShield)
+    monkeypatch.setattr(hotkeys_mod.keyboard, "Listener", listener_factory)
+    hotkey = build_hotkey(tmp_path, enable_hotkey_shield=True)
+    shield = hotkey._hotkey_shield
+
+    with pytest.raises(RuntimeError, match="listener failed"):
+        hotkey.start()
+
+    assert listeners[0].stopped is True
+    assert shield.started is True
+    assert shield.stopped is True
+    assert hotkey._listener is None
+    assert hotkey._listening_resources_active is False

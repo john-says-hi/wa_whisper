@@ -11,6 +11,9 @@ keyboard_module = types.ModuleType("pynput.keyboard")
 
 class _Key:
     alt_r = "alt_r"
+    ctrl = "ctrl_l"
+    ctrl_l = ctrl
+    ctrl_r = "ctrl_r"
     esc = "esc"
 
 

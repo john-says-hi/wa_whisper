@@ -17,9 +17,16 @@ def ensure_log_path(log_path: Path) -> Path:
 
 
 def write_log(message: str, log_path: Path = DEFAULT_LOG_PATH) -> None:
-    """Append `message` to the log with a UTC timestamp."""
-    timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    path = ensure_log_path(log_path)
-    with path.open("a", encoding="utf-8", errors="ignore") as fp:
-        fp.write(f"{timestamp} {message}\n")
+    """Best-effort append ``message`` without affecting runtime control flow.
 
+    Ordinary filesystem and formatting failures are intentionally ignored.
+    Process-control exceptions such as ``KeyboardInterrupt`` and ``SystemExit``
+    remain visible because they do not inherit from ``Exception``.
+    """
+    try:
+        timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        path = ensure_log_path(log_path)
+        with path.open("a", encoding="utf-8", errors="ignore") as fp:
+            fp.write(f"{timestamp} {message}\n")
+    except Exception:
+        return

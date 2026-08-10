@@ -30,6 +30,10 @@ class RecorderStartError(Exception):
         self.attempts = attempts
 
 
+class RecorderInputChannelError(ValueError):
+    """Raised when a configured input channel cannot be captured."""
+
+
 @dataclass(slots=True)
 class RecorderStats:
     """Summary statistics for the most recent capture."""
@@ -78,12 +82,19 @@ class Recorder:
         preamp: float = 1.0,
         start_retry_attempts: int = 3,
         start_retry_delay: float = 0.2,
+        input_channel: Optional[int] = None,
     ) -> None:
+        if input_channel is not None and input_channel < 1:
+            raise RecorderInputChannelError(
+                f"input_channel must be a positive one-based channel number; got {input_channel}",
+            )
+
         self.sample_rate = sample_rate
         self.device_index = device_index
         self.log_path = log_path
         self.rms_threshold = rms_threshold
         self.preamp = preamp
+        self.input_channel = input_channel
         self._start_retry_attempts = max(1, start_retry_attempts)
         self._start_retry_delay = max(0.0, start_retry_delay)
 
@@ -142,6 +153,7 @@ class Recorder:
                     self._resolved_input_name,
                     self._resolved_input_sample_rate,
                 ) = self._resolve_input_stream()
+                self._validate_input_channel(self._resolved_input_channels)
                 with self._lock:
                     # Reset state so we always begin from a clean queue.
                     self._queue = queue.Queue()
@@ -154,6 +166,15 @@ class Recorder:
                     callback=audio_callback,
                 )
                 stream.start()
+            except RecorderInputChannelError:
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
+                with self._lock:
+                    self._running = False
+                    self._teardown_stream()
+                    self._close_writer(remove_file=True)
+                raise
             except Exception as exc:  # pragma: no cover - exercised in tests via stub
                 last_error = exc
                 if stream is not None:
@@ -256,6 +277,23 @@ class Recorder:
 
     def _collapse_to_mono(self, block: np.ndarray) -> np.ndarray:
         channel_count = self._block_channel_count(block)
+        if channel_count <= 0:
+            return block
+
+        if self.input_channel is not None:
+            self._validate_input_channel(channel_count)
+            selected_channel = self.input_channel - 1
+            self._log_channel_selection(
+                channel_count=channel_count,
+                selected_channel=selected_channel,
+                configured=True,
+            )
+            if hasattr(block, "shape"):
+                return block[:, selected_channel : selected_channel + 1]
+            if isinstance(block[0], (list, tuple)):
+                return [[frame[selected_channel]] for frame in block]  # pragma: no cover - test shim
+            return [[sample] for sample in block]  # pragma: no cover - test shim
+
         if channel_count <= 1:
             if getattr(block, "ndim", 1) == 1 and hasattr(block, "reshape"):
                 return block.reshape(-1, 1)
@@ -271,16 +309,40 @@ class Recorder:
                 selected_channel = channel_index
                 selected_rms = rms
 
-        if not self._channel_selection_logged:
-            write_log(
-                f"Recorder collapsing {channel_count} channels to mono via channel {selected_channel + 1}",
-                self.log_path,
-            )
-            self._channel_selection_logged = True
+        self._log_channel_selection(
+            channel_count=channel_count,
+            selected_channel=selected_channel,
+            configured=False,
+        )
 
         if hasattr(block, "shape"):
             return block[:, selected_channel : selected_channel + 1]
         return [[frame[selected_channel]] for frame in block]  # pragma: no cover - test shim
+
+    def _validate_input_channel(self, available_channel_count: int) -> None:
+        if self.input_channel is None or self.input_channel <= available_channel_count:
+            return
+        raise RecorderInputChannelError(
+            f"Configured input channel {self.input_channel} is unavailable; "
+            f"the resolved input exposes {available_channel_count} channel(s)",
+        )
+
+    def _log_channel_selection(
+        self,
+        *,
+        channel_count: int,
+        selected_channel: int,
+        configured: bool,
+    ) -> None:
+        if self._channel_selection_logged:
+            return
+        selection_kind = "configured channel" if configured else "channel"
+        write_log(
+            f"Recorder collapsing {channel_count} channels to mono via "
+            f"{selection_kind} {selected_channel + 1}",
+            self.log_path,
+        )
+        self._channel_selection_logged = True
 
     def _block_channel_count(self, block: np.ndarray) -> int:
         shape = getattr(block, "shape", None)

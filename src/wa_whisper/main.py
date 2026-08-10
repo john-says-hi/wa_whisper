@@ -15,19 +15,32 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
 
+from .audio_cues import play_system_bell
 from .compute_mode import ComputeModeError, compute_mode_values, resolve_compute_device
-from .dictation_archive import DictationArchive, DictationRecord
-from .hotkeys import PushToTalkHotkey
-from .log_utils import DEFAULT_LOG_PATH, ensure_log_path, write_log
+from .dictation_archive import DictationArchive, DictationRecord, format_timestamp, utc_now
+from .hotkeys import CaptureEndReason, CaptureResult, PushToTalkHotkey
+from .log_utils import DEFAULT_LOG_PATH, write_log
 from .recorder import Recorder, RecorderStats
 from .recovery_queue import insert_transcript_into_recovery_queue, skipped_recovery_queue_result
 from .text_postprocess import postprocess_text
 from .voice_isolation import VoiceIsolationPipeline
 from .whisper_backend import DEFAULT_MODEL_CACHE, WhisperBackend, WhisperConfig
+
+
+def positive_int_argument(value: str) -> int:
+    """Parse a positive integer CLI argument."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -37,6 +50,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preamp", type=float, default=1.0, help="Signal gain applied before encoding.")
     parser.add_argument("--silence-timeout", type=float, default=0.5, help="Seconds of silence before stop.")
     parser.add_argument("--device-index", type=int, default=None, help="SoundDevice input index.")
+    parser.add_argument(
+        "--input-channel",
+        type=positive_int_argument,
+        default=None,
+        metavar="N",
+        help="One-based input channel to record. Omit to select automatically.",
+    )
     parser.add_argument("--log-path", type=Path, default=DEFAULT_LOG_PATH, help="Log file path.")
     parser.add_argument("--model", default="large-v3", help="Whisper model name.")
     parser.add_argument("--beam-size", type=int, default=5, help="Beam search width.")
@@ -77,11 +97,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-TaskItem = Optional[Tuple[Path, Optional[RecorderStats]]]
-DEFAULT_BEEP_COMMAND = (
-    Path("/usr/bin/paplay"),
-    Path("/usr/share/sounds/freedesktop/stereo/bell.oga"),
-)
+@dataclass(frozen=True, slots=True)
+class CaptureTask:
+    audio_path: Path
+    stats: Optional[RecorderStats]
+    created_at: datetime
+
+
+TaskItem = Optional[CaptureTask]
+INTERRUPTION_REASONS = {
+    CaptureEndReason.SERVICE_SHUTDOWN: "service_shutdown",
+    CaptureEndReason.ESCAPE: "escape",
+}
 ORCA_BRACKETED_PASTE_END = "\x1b[201~"
 ORCA_BRACKETED_PASTE_START = "\x1b[200~"
 ORCA_DAEMON_PROTOCOL_VERSION = 10
@@ -107,6 +134,71 @@ class ActiveWindowInfo:
     process_args: str
 
 
+class ShutdownCoordinator:
+    """Finalize capture and close the worker queue exactly once."""
+
+    def __init__(
+        self,
+        *,
+        task_queue: "queue.Queue[TaskItem]",
+        stop_event: threading.Event,
+        log_path: Path,
+    ) -> None:
+        self._task_queue = task_queue
+        self._stop_event = stop_event
+        self._log_path = log_path
+        self._hotkey: Optional[PushToTalkHotkey] = None
+        self._requested = False
+        self._lock = threading.RLock()
+        self._request_gate = threading.Lock()
+
+    def bind_hotkey(self, hotkey: PushToTalkHotkey) -> None:
+        """Bind the hotkey after constructing its exit callback."""
+        with self._lock:
+            if self._hotkey is not None:
+                raise RuntimeError("Shutdown hotkey is already bound")
+            if self._requested:
+                raise RuntimeError("Cannot bind shutdown hotkey after shutdown starts")
+            self._hotkey = hotkey
+
+    def request(self, signum: int | None, *, end_reason: CaptureEndReason) -> bool:
+        """Stop capture before publishing the sentinel and stop event."""
+        if not self._request_gate.acquire(blocking=False):
+            return False
+        try:
+            with self._lock:
+                if self._requested:
+                    return False
+                if self._hotkey is None:
+                    raise RuntimeError("Shutdown hotkey has not been bound")
+                self._requested = True
+                hotkey = self._hotkey
+        finally:
+            self._request_gate.release()
+
+        if end_reason is CaptureEndReason.ESCAPE:
+            self._write_log_best_effort("Received shutdown request (escape)")
+        else:
+            self._write_log_best_effort(
+                f"Received shutdown signal {signum} ({end_reason.value})"
+            )
+
+        try:
+            hotkey.stop(end_reason=end_reason)
+        except Exception as exc:
+            self._write_log_best_effort(f"Hotkey shutdown failed: {exc}")
+        finally:
+            self._task_queue.put(None)
+            self._stop_event.set()
+        return True
+
+    def _write_log_best_effort(self, message: str) -> None:
+        try:
+            write_log(message, self._log_path)
+        except Exception:
+            return
+
+
 def ensure_xdotool(path_override: Optional[Path]) -> Path:
     if path_override:
         return path_override
@@ -127,7 +219,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
-    log_path = ensure_log_path(args.log_path)
+    log_path = args.log_path
     write_log("wa_whisper starting", log_path)
 
     try:
@@ -154,6 +246,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     recorder = Recorder(
         sample_rate=args.sample_rate,
         device_index=args.device_index,
+        input_channel=args.input_channel,
         log_path=log_path,
         rms_threshold=args.rms_threshold,
         preamp=args.preamp,
@@ -166,10 +259,14 @@ def main(argv: Optional[list[str]] = None) -> None:
         else args.xdotool_path or Path("xdotool")
     )
     archive = DictationArchive()
-    prune_dictation_archive(archive, log_path)
 
     task_queue: "queue.Queue[TaskItem]" = queue.Queue()
     stop_event = threading.Event()
+    shutdown_coordinator = ShutdownCoordinator(
+        task_queue=task_queue,
+        stop_event=stop_event,
+        log_path=log_path,
+    )
 
     def worker_loop() -> None:
         while True:
@@ -182,10 +279,10 @@ def main(argv: Optional[list[str]] = None) -> None:
             if item is None:
                 task_queue.task_done()
                 break
-            audio_path, stats = item
             process_capture(
-                audio_path=audio_path,
-                stats=stats,
+                audio_path=item.audio_path,
+                stats=item.stats,
+                created_at=item.created_at,
                 backend=backend,
                 voice_isolation=voice_isolation,
                 log_path=log_path,
@@ -205,15 +302,20 @@ def main(argv: Optional[list[str]] = None) -> None:
     worker = threading.Thread(target=worker_loop, daemon=True)
     worker.start()
 
-    def handle_capture(path: Optional[Path], stats: Optional[RecorderStats]) -> None:
-        if stop_event.is_set():
-            if path:
-                path.unlink(missing_ok=True)
-            return
-        if path is None:
-            write_log("Capture finished with no audio file", log_path)
-            return
-        task_queue.put((path, stats))
+    def handle_capture(result: CaptureResult) -> None:
+        handle_capture_result(
+            result,
+            task_queue=task_queue,
+            archive=archive,
+            backend=backend,
+            log_path=log_path,
+        )
+
+    def handle_exit(end_reason: CaptureEndReason) -> None:
+        shutdown_coordinator.request(
+            None,
+            end_reason=end_reason,
+        )
 
     hotkey = PushToTalkHotkey(
         recorder,
@@ -222,39 +324,127 @@ def main(argv: Optional[list[str]] = None) -> None:
         log_path=log_path,
         enable_audio_mute=not args.no_audio_mute,
         exit_on_esc=args.exit_on_esc,
-        on_exit=lambda: request_shutdown(signal.SIGTERM),
+        on_exit=handle_exit,
         enable_hotkey_shield=not args.no_hotkey_shield,
     )
-
-    def request_shutdown(signum: int) -> None:
-        if stop_event.is_set():
-            return
-        write_log(f"Received shutdown signal {signum}", log_path)
-        stop_event.set()
-        hotkey.stop()
-        task_queue.put(None)
+    shutdown_coordinator.bind_hotkey(hotkey)
 
     def shutdown(signum: int, _frame) -> None:
-        request_shutdown(signum)
+        shutdown_coordinator.request(
+            signum,
+            end_reason=CaptureEndReason.SERVICE_SHUTDOWN,
+        )
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
     try:
-        hotkey.start()
-        write_log("Ready for push-to-talk (Right Alt)", log_path)
+        if hotkey.start():
+            write_log(
+                "Ready for dictation (Right Alt push-to-talk; "
+                "Left Ctrl + Right Alt hands-free)",
+                log_path,
+            )
         stop_event.wait()
     finally:
-        request_shutdown(signal.SIGTERM)
+        shutdown_coordinator.request(
+            signal.SIGTERM,
+            end_reason=CaptureEndReason.SERVICE_SHUTDOWN,
+        )
         task_queue.join()
         worker.join(timeout=2.0)
         write_log("wa_whisper stopped", log_path)
+
+
+def handle_capture_result(
+    result: CaptureResult,
+    *,
+    task_queue: "queue.Queue[TaskItem]",
+    archive: DictationArchive,
+    backend: WhisperBackend,
+    log_path: Path,
+) -> None:
+    """Queue completed captures and synchronously archive interrupted ones."""
+    if result.path is None:
+        write_log("Capture finished with no audio file", log_path)
+        return
+
+    if result.end_reason == CaptureEndReason.USER_COMPLETED:
+        task_queue.put(
+            CaptureTask(
+                audio_path=result.path,
+                stats=result.stats,
+                created_at=result.created_at,
+            )
+        )
+        return
+
+    archive_interrupted_capture(
+        audio_path=result.path,
+        stats=result.stats,
+        created_at=result.created_at,
+        end_reason=result.end_reason,
+        archive=archive,
+        backend=backend,
+        log_path=log_path,
+    )
+
+
+def archive_interrupted_capture(
+    *,
+    audio_path: Path,
+    stats: Optional[RecorderStats],
+    created_at: datetime,
+    end_reason: CaptureEndReason,
+    archive: DictationArchive,
+    backend: WhisperBackend,
+    log_path: Path,
+) -> bool:
+    """Archive an interrupted WAV without sending it through transcription."""
+    interruption_reason = INTERRUPTION_REASONS.get(end_reason)
+    if interruption_reason is None:
+        write_log(
+            f"Unsupported capture end reason {end_reason}; retained temporary audio at {audio_path}",
+            log_path,
+        )
+        return False
+
+    try:
+        interrupted_at = format_timestamp(utc_now())
+        record = archive.start_record(
+            audio_path,
+            stats=stats,
+            backend=backend_archive_metadata(backend),
+            created_at=created_at,
+        )
+        archive.update_record(
+            record,
+            status="interrupted",
+            interrupted_at=interrupted_at,
+            interruption_reason=interruption_reason,
+        )
+    except Exception as exc:
+        write_log(
+            f"Interrupted capture archive failed; retained temporary audio at {audio_path}: {exc}",
+            log_path,
+        )
+        return False
+
+    try:
+        audio_path.unlink()
+    except OSError as exc:
+        write_log(f"Archived interrupted capture but could not delete {audio_path}: {exc}", log_path)
+        return False
+
+    write_log(f"Archived interrupted capture audio: {record.audio_path}", log_path)
+    return True
 
 
 def process_capture(
     *,
     audio_path: Path,
     stats: Optional[RecorderStats],
+    created_at: datetime,
     backend: WhisperBackend,
     voice_isolation: Optional[VoiceIsolationPipeline],
     log_path: Path,
@@ -283,6 +473,7 @@ def process_capture(
         archive,
         audio_path,
         stats=stats,
+        created_at=created_at,
         backend=backend_archive_metadata(backend),
         log_path=log_path,
     )
@@ -358,8 +549,6 @@ def process_capture(
         if enhanced_path != audio_path and enhanced_path.exists():
             enhanced_path.unlink(missing_ok=True)
         audio_path.unlink(missing_ok=True)
-        if archive:
-            prune_dictation_archive(archive, log_path)
 
 
 def start_dictation_archive_record(
@@ -367,13 +556,19 @@ def start_dictation_archive_record(
     audio_path: Path,
     *,
     stats: Optional[RecorderStats],
+    created_at: datetime,
     backend: Mapping[str, Any],
     log_path: Path,
 ) -> Optional[DictationRecord]:
     if archive is None:
         return None
     try:
-        record = archive.start_record(audio_path, stats=stats, backend=backend)
+        record = archive.start_record(
+            audio_path,
+            stats=stats,
+            backend=backend,
+            created_at=created_at,
+        )
     except Exception as exc:
         write_log(f"Dictation archive audio save failed: {exc}", log_path)
         return None
@@ -411,16 +606,6 @@ def update_dictation_archive_record(
         archive.update_record(record, **updates)
     except Exception as exc:
         write_log(f"Dictation archive metadata update failed: {exc}", log_path)
-
-
-def prune_dictation_archive(archive: DictationArchive, log_path: Path) -> None:
-    try:
-        removed = archive.prune_expired()
-    except Exception as exc:
-        write_log(f"Dictation archive prune failed: {exc}", log_path)
-        return
-    if removed:
-        write_log(f"Dictation archive pruned {removed} expired record(s)", log_path)
 
 
 def backend_archive_metadata(backend: WhisperBackend) -> dict[str, Any]:
@@ -1131,20 +1316,7 @@ def build_orca_bracketed_paste(text: str) -> str:
 
 
 def play_completion_beep(log_path: Path) -> None:
-    player, sound = DEFAULT_BEEP_COMMAND
-    if not player.exists() or not sound.exists():
-        write_log("Completion beep skipped: paplay or bell sound missing", log_path)
-        return
-    try:
-        subprocess.run(
-            [str(player), str(sound)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.decode("utf-8", "ignore") if exc.stderr else ""
-        write_log(f"Completion beep failed: {exc}; stderr={stderr.strip()}", log_path)
+    play_system_bell(log_path, purpose="completion")
 
 
 if __name__ == "__main__":
