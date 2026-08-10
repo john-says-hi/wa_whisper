@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Start the push-to-talk service under a Wayland compositor.
+#
+# Two things differ from the X11 launcher:
+#
+#   1. WAYLAND_DISPLAY has to be discovered, not assumed. The socket is named
+#      wayland-0, wayland-1, ... depending on what else claimed a slot first,
+#      and the number is not stable across reboots. A systemd user unit that
+#      hardcodes one will silently type into nothing the day it changes.
+#   2. Injection goes through wtype. xdotool speaks XTEST, which a Wayland
+#      compositor does not implement, so it reaches XWayland clients at best.
+#
+# The hotkey backend needs no flag: hotkeys.py picks evdev when
+# XDG_SESSION_TYPE=wayland.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+export XDG_SESSION_TYPE=wayland
+
+if [[ -z "${WAYLAND_DISPLAY:-}" || ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]]; then
+  for sock in "$XDG_RUNTIME_DIR"/wayland-*; do
+    # Skip the .lock files and the per-GPU -renderD* helper sockets.
+    [[ "$sock" == *.lock || "$sock" == *-renderD* ]] && continue
+    [[ -S "$sock" ]] || continue
+    WAYLAND_DISPLAY="$(basename "$sock")"
+    break
+  done
+fi
+
+if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+  echo "wa-whisper: no Wayland socket found in $XDG_RUNTIME_DIR" >&2
+  exit 1
+fi
+export WAYLAND_DISPLAY
+
+exec "$ROOT_DIR/scripts/wa-whisper-start" --injection-mode wtype "$@"

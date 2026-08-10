@@ -82,9 +82,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--xdotool-path", type=Path, default=None, help="Override xdotool binary path.")
     parser.add_argument(
         "--injection-mode",
-        choices=["xdotool-type", "orca-daemon", "auto"],
+        choices=["xdotool-type", "orca-daemon", "auto", "wtype"],
         default="xdotool-type",
-        help="Text delivery strategy. The default preserves xdotool typing.",
+        help=(
+            "Text delivery strategy. The default preserves xdotool typing. "
+            "Use 'wtype' under Wayland, where xdotool can only reach XWayland clients."
+        ),
     )
     parser.add_argument("--orca-daemon-dir", type=Path, default=None, help="Override Orca daemon directory.")
     parser.add_argument("--orca-session-id", default=None, help="Target one Orca daemon terminal session.")
@@ -123,6 +126,10 @@ class InjectionMode(str, Enum):
     XDOTOOL_TYPE = "xdotool-type"
     ORCA_DAEMON = "orca-daemon"
     AUTO = "auto"
+    # Wayland compositors expose no XTEST, so xdotool silently types into
+    # nothing. wtype drives zwp_virtual_keyboard_manager_v1 instead, which
+    # reaches native Wayland windows and XWayland ones alike.
+    WTYPE = "wtype"
 
 
 @dataclass(frozen=True)
@@ -206,6 +213,13 @@ def ensure_xdotool(path_override: Optional[Path]) -> Path:
     if not resolved:
         raise RuntimeError("xdotool not found; install it to enable text injection.")
     return Path(resolved)
+
+
+def ensure_wtype() -> str:
+    resolved = shutil.which("wtype")
+    if not resolved:
+        raise RuntimeError("wtype not found; install it (apt install wtype) to type under Wayland.")
+    return resolved
 
 
 def parse_injection_mode(value: str) -> InjectionMode:
@@ -640,6 +654,12 @@ def inject_text(
             write_log("Orca daemon injection failed; skipped xdotool fallback", log_path)
         return delivered
 
+    if injection_mode == InjectionMode.WTYPE:
+        delivered = type_text_with_wtype(text, log_path)
+        if delivered and enable_beep:
+            play_completion_beep(log_path)
+        return delivered
+
     if injection_mode == InjectionMode.AUTO:
         return inject_text_auto(
             text,
@@ -719,6 +739,31 @@ def inject_text_auto(
     if delivered and enable_beep:
         play_completion_beep(log_path)
     return delivered
+
+
+def type_text_with_wtype(text: str, log_path: Path) -> bool:
+    """Type text into the focused window through the Wayland virtual keyboard.
+
+    ``--`` matters: a transcript beginning with a dash would otherwise be parsed
+    as wtype's own options and silently dropped.
+    """
+    try:
+        wtype_bin = ensure_wtype()
+    except RuntimeError as exc:
+        write_log(str(exc), log_path)
+        return False
+    try:
+        subprocess.run(
+            [wtype_bin, "--", text],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode(errors="replace").strip()
+        write_log(f"wtype failed: {exc}{f' ({detail})' if detail else ''}", log_path)
+        return False
+    return True
 
 
 def type_text_with_xdotool(text: str, xdotool_bin: Path, log_path: Path) -> bool:

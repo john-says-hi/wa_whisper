@@ -1,9 +1,16 @@
 import math
+import os
 import sys
 import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+# PushToTalkHotkey picks its keyboard backend from the live session: X11 gets
+# pynput, Wayland gets evdev. Without pinning this, the suite would pass or fail
+# depending on which desktop the developer happened to log into. Tests that
+# exercise the Wayland path set this themselves.
+os.environ["XDG_SESSION_TYPE"] = "x11"
 
 pynput_module = types.ModuleType("pynput")
 keyboard_module = types.ModuleType("pynput.keyboard")

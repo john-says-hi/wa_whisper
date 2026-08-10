@@ -15,6 +15,7 @@ from typing import Callable, Optional
 from pynput import keyboard
 
 from .audio_cues import play_system_bell
+from .evdev_listener import EvdevKeyListener, wayland_session
 from .log_utils import write_log
 from .recorder import Recorder, RecorderStartError, RecorderStats
 from .x11_key_shield import X11KeyShield
@@ -265,10 +266,18 @@ class PushToTalkHotkey:
         self._exit_on_esc = exit_on_esc
         self._on_exit = on_exit
         self._mute_controller = AudioMuteController(log_path) if enable_audio_mute else None
-        self._hotkey_shield = X11KeyShield("Alt_R", log_path) if enable_hotkey_shield else None
+        # The shield is an X11 root-window grab. Under Wayland there is no root
+        # window to grab and the Xlib call fails, so it is skipped entirely --
+        # which means a bare Right Alt still reaches the focused window there.
+        self._use_evdev = wayland_session()
+        self._hotkey_shield = (
+            X11KeyShield("Alt_R", log_path)
+            if enable_hotkey_shield and not self._use_evdev
+            else None
+        )
         self._hotkey_repress_grace_seconds = max(0.0, hotkey_repress_grace_seconds)
 
-        self._listener: keyboard.Listener | None = None
+        self._listener: keyboard.Listener | EvdevKeyListener | None = None
         self._mode = RecordingMode.IDLE
         self._left_ctrl_down = False
         self._right_alt_down = False
@@ -283,6 +292,27 @@ class PushToTalkHotkey:
         self._lock = threading.RLock()
         self._state_changed = threading.Condition(self._lock)
 
+    def _create_listener(self) -> "keyboard.Listener | EvdevKeyListener":
+        """Pick a hotkey backend that can actually see keys in this session.
+
+        pynput reads the keyboard through X11, which a Wayland compositor will
+        not expose. It starts without error and then never fires, so the choice
+        has to be made up front rather than discovered at the first keypress.
+        Both backends deliver the same ``pynput`` key objects, so everything
+        downstream of here is identical.
+        """
+        if self._use_evdev:
+            return EvdevKeyListener(
+                on_press=self._handle_press,
+                on_release=self._handle_release,
+                log_path=self._log_path,
+            )
+        return keyboard.Listener(
+            on_press=self._handle_press,
+            on_release=self._handle_release,
+            suppress=False,
+        )
+
     def start(self) -> bool:
         """Begin listening for hotkey events."""
         with self._state_changed:
@@ -293,7 +323,7 @@ class PushToTalkHotkey:
                 return True
             self._events_enabled = False
             self._exit_requested = False
-            listener: keyboard.Listener | None = None
+            listener: keyboard.Listener | EvdevKeyListener | None = None
             try:
                 if self._hotkey_shield:
                     self._hotkey_shield.start()
@@ -301,11 +331,7 @@ class PushToTalkHotkey:
                     self._stop_listening_resources(None)
                     return False
 
-                listener = keyboard.Listener(
-                    on_press=self._handle_press,
-                    on_release=self._handle_release,
-                    suppress=False,
-                )
+                listener = self._create_listener()
                 listener.start()
             except Exception:
                 self._stop_listening_resources(listener)
