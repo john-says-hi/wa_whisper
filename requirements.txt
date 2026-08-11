@@ -1,17 +1,32 @@
+# Pinned 2026-08-10. These are the versions running on BOTH the desktop and the
+# laptop — verified identical on each. Match them; do not upgrade casually.
+#
+# Why pinned: everything here was unversioned, so rebuilding the venv on another
+# machine silently drifted from the desktop. When the laptop was set up it could
+# not rebuild at all — the carried venv was Python 3.10 and the laptop ships 3.12
+# only — and an unpinned rebuild would have pulled a different torch/whisper pair
+# than the one the transcripts were validated against.
+
 # Core speech recognition and model runtime
-openai-whisper
-# Install CUDA-enabled wheel manually if needed
-torch
+openai-whisper==20250625
+# CPU wheel by default. For CUDA install the matching cu128 wheel manually:
+#   pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu128
+torch==2.9.0
 
 # Audio capture and processing
-sounddevice
-soundfile
-numpy
+sounddevice==0.5.2
+soundfile==0.13.1
+numpy==2.2.6
 
 # Hotkey handling and automation
-pynput
-PyYAML
-word2number
+# pynput reads the keyboard through Xlib/XRecord and is X11-only: on Wayland it
+# starts, reports no error, and never fires. evdev is the Wayland path — it reads
+# /dev/input/event* below the compositor. Both are installed on both machines;
+# the code picks one at runtime from XDG_SESSION_TYPE.
+pynput==1.8.1
+evdev==1.9.2
+PyYAML==6.0.3
+word2number==1.1
 
 # Optional accelerated decoder (future optimization)
-faster-whisper
+faster-whisper==1.2.0
