@@ -1,5 +1,7 @@
 # wa_whisper
 
+For Windows installation and Ctrl+Shift+F1 power control, see [Windows voice typing](windows.md).
+
 Early prototype of a push-to-talk dictation utility that mirrors the ergonomics of `wa_parakeet` while using OpenAI Whisper `large-v3` as the ASR backend.
 
 ## Quickstart
