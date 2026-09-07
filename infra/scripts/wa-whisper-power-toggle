@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+UNIT=wa-whisper-ptt.service
+PHRASES="$HOME/.local/share/wa_whisper/power_phrases"
+RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+notify() {
+    notify-send -a 'Voice to text' "$1" "${2:-}" || true
+}
+
+play() {
+    timeout 8 paplay "$PHRASES/$1.wav" || true
+}
+
+# Ignore overlapping presses while stopping, starting, or playing a cue.
+exec 9>"$RUNTIME/wa-whisper-power-toggle.lock"
+flock -n 9 || exit 0
+trap 'notify "Dictation toggle failed" "Check systemctl --user status wa-whisper-ptt.service"' ERR
+
+state=$(systemctl --user show "$UNIT" --property=ActiveState --value)
+case "$state" in
+    active|activating|reloading)
+        play powering_down
+        systemctl --user stop "$UNIT"
+        notify 'Dictation off' 'GPU model unloaded. Ctrl+Shift+F1 starts it again.'
+        ;;
+    inactive|failed)
+        systemctl --user start "$UNIT"
+        play online
+        notify 'Dictation starting' 'The model is loading. Startup autoload remains enabled.'
+        ;;
+    deactivating)
+        notify 'Dictation is stopping' 'Press Ctrl+Shift+F1 again after shutdown completes.'
+        ;;
+    *)
+        echo "Unexpected service state: $state" >&2
+        exit 1
+        ;;
+esac
