@@ -23,6 +23,12 @@ class ShieldedWindowsListener(keyboard.Listener):
 
 
 class WindowsPushToTalkHotkey(PushToTalkHotkey):
+    def __init__(self, *args, enable_audio_mute=True, **kwargs):
+        super().__init__(*args, enable_audio_mute=False, **kwargs)
+        if enable_audio_mute:
+            from .windows_audio import WindowsAudioMuteController
+            self._mute_controller = WindowsAudioMuteController()
+
     def _handle_press(self, key, injected=False):
         return super()._handle_press(normalize_recording_key(key), injected)
 

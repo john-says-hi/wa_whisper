@@ -8,3 +8,4 @@ pynput==1.8.1
 PyYAML==6.0.3
 word2number==1.1
 faster-whisper==1.2.0
+pycaw==20251023

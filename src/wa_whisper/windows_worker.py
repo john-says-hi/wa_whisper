@@ -83,7 +83,7 @@ def main() -> None:
         silence_timeout=0.5,
         on_capture_finished=captures.put,
         log_path=DEFAULT_LOG_PATH,
-        enable_audio_mute=False,
+        enable_audio_mute=True,
         enable_hotkey_shield=False,
         exit_on_esc=False,
     )

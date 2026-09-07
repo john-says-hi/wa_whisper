@@ -32,6 +32,9 @@ stored password. It can run on battery and has no execution time limit.
 ## Use
 
 - Ctrl+Shift+F1 powers dictation off/on, unloading the GPU worker when it exits.
+- System speakers mute during recording and return to their previous mute state
+  afterward, including when recording fails or dictation is powered off. Volume
+  level is unchanged. Audio already muted stays muted.
 - Hold Right Alt to speak; release to transcribe into the focused text field.
   The Windows adapter normalizes pynput's AltGr representation of VK_RMENU to
   the shared recorder's Right Alt key on both press and release.
@@ -44,8 +47,8 @@ stored password. It can run on battery and has no execution time limit.
   waits for inference to finish, saves the transcript, and skips text injection.
 
 Whisper runs locally. Native Windows Win+H remains separately available; do not
-record with both at once. The Windows adapter does not provide Linux desktop
-audio muting, CopyQ history integration, or the Linux `latest` symlink archive.
+record with both at once. The Windows adapter does not provide CopyQ history integration or the Linux
+`latest` symlink archive.
 Avoid elevated applications: ordinary Windows processes cannot inject text into
 an elevated application. Dictations go to the focused field when inference finishes.
 
