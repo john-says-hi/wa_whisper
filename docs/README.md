@@ -42,3 +42,7 @@ systemctl --user enable --now wa-whisper-ptt.service
 ```
 
 This replaces the legacy Parakeet service; disable it with `systemctl --user disable --now parakeet-ptt.service`.
+
+## Power toggle
+
+See [Dictation power toggle](power_toggle.md) for Ctrl+Shift+F1 setup and behavior.

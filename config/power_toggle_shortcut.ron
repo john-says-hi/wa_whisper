@@ -1,0 +1,3 @@
+// Merge this entry into ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom.
+// Substitute the user's absolute home path; Spawn does not expand shell variables.
+(modifiers: [Ctrl, Shift], key: "F1"): Spawn("/home/johnwalton/.local/bin/wa-whisper-power-toggle"),
