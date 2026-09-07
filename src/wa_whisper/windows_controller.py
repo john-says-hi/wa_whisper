@@ -13,6 +13,7 @@ import tkinter as tk
 from pathlib import Path
 
 from .log_utils import write_log
+from .windows_control import request_power, take_request
 
 STATE_DIR = Path.home() / ".cache" / "wa_whisper"
 HOTKEY_ID = 1
@@ -41,6 +42,7 @@ class DictationController:
         self.root = root
         self.process: subprocess.Popen | None = None
         self.stopping = False
+        self.start_pending = False
         self.events: queue.Queue = queue.Queue()
         self.status = tk.StringVar(value="Starting")
         root.title("WA Whisper — Voice to Text")
@@ -52,6 +54,11 @@ class DictationController:
         threading.Thread(target=register_power_hotkey, args=(self.events,), daemon=True).start()
         self.start()
         root.after(200, self.poll)
+
+    def set_status(self, message: str) -> None:
+        self.status.set(message)
+        self.root.title("WA Whisper — " + message)
+        (STATE_DIR / "windows_status.txt").write_text(message, encoding="utf-8")
 
     def start(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,7 +77,7 @@ class DictationController:
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 env=environment,
             )
-        self.status.set("Starting")
+        self.set_status("Starting — loading the GPU model")
         write_log("Windows dictation power on")
 
     def toggle(self) -> None:
@@ -83,12 +90,22 @@ class DictationController:
             self.process.stdin.write("stop\n")
             self.process.stdin.flush()
             self.stopping = True
-            self.status.set("Stopping safely; saving any active recording")
+            self.set_status("Stopping safely; saving any active recording")
             write_log("Windows dictation power off requested")
         except (BrokenPipeError, OSError) as exc:
             self.status.set(f"Stopping: {exc}")
 
     def poll(self) -> None:
+        request = take_request()
+        if request == "start":
+            if self.stopping:
+                self.start_pending = True
+            elif self.process is None or self.process.poll() is not None:
+                self.start_pending = True
+            self.root.deiconify()
+            self.root.lift()
+        elif request == "stop" and self.process is not None and self.process.poll() is None:
+            self.toggle()
         while not self.events.empty():
             event = self.events.get_nowait()
             if event == "toggle":
@@ -104,13 +121,16 @@ class DictationController:
                 self.process.stdin.close()
                 self.process = None
                 self.stopping = False
-                self.status.set("Off — Ctrl+Shift+F1 to start" if code == 0 else "Stopped with an error — check windows_worker.log")
+                self.set_status("OFF — Ctrl+Shift+F1 or the Desktop shortcut to start" if code == 0 else "Stopped with an error — check windows_worker.log")
                 write_log(f"Windows dictation worker exited: {code}")
             elif not self.stopping:
                 try:
                     self.status.set((STATE_DIR / "windows_status.txt").read_text(encoding="utf-8"))
                 except OSError:
                     pass
+        if self.start_pending and self.process is None:
+            self.start_pending = False
+            self.start()
         self.root.after(200, self.poll)
 
 
@@ -121,6 +141,7 @@ def main() -> None:
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:
+        request_power("start")
         return
     root = tk.Tk()
     DictationController(root)

@@ -33,8 +33,13 @@ stored password. It can run on battery and has no execution time limit.
 
 - Ctrl+Shift+F1 powers dictation off/on, unloading the GPU worker when it exits.
 - Hold Right Alt to speak; release to transcribe into the focused text field.
+  The Windows adapter normalizes pynput's AltGr representation of VK_RMENU to
+  the shared recorder's Right Alt key on both press and release.
 - Left Ctrl followed by Right Alt toggles hands-free recording.
 - Closing the small control window minimizes it; the power shortcut stays active.
+- Opening the Desktop shortcut again explicitly turns dictation on if it was off.
+  It does not toggle a running worker off. The status file changes to OFF when
+  the worker exits, rather than retaining the worker's previous Ready message.
 - Turning off during a recording preserves audio. Turning off during inference
   waits for inference to finish, saves the transcript, and skips text injection.
 
@@ -49,6 +54,19 @@ timestamped directories. Errors are saved in each record's `metadata.json`.
 Logs and current status are under `.cache\wa_whisper`, including
 `windows_worker.log`, `push_to_talk.log`, and `windows_status.txt`.
 
+For remote administration, use the installed virtual environment's Python:
+
+```powershell
+.venv\Scripts\python.exe -m wa_whisper.windows_control status
+.venv\Scripts\python.exe -m wa_whisper.windows_control start
+.venv\Scripts\python.exe -m wa_whisper.windows_control stop
+```
+
+These send requests to the interactive controller; they do not start a second
+GUI in the SSH session. A Running scheduled task means the controller is alive,
+not necessarily that dictation is on. Confirm Ready, the worker process, and GPU
+memory when diagnosing nonresponsive recording keys.
+
 ## Verify and disable
 
 Test GPU transcription of a known WAV, interactive keyboard injection, the global
@@ -57,6 +75,9 @@ Linux unit tests: `pytest tests/unit/test_windows_recovery.py tests/unit/test_wi
 The scripts under `tests/integration/windows_*_probe.py` require an interactive
 Windows session. The input probe refuses to type until its own test window has
 focus. Click its text box if Windows prevents a background process taking focus.
+The hotkey probe uses actual Windows keyboard hooks with synthetic keystrokes
+and a harmless recorder, verifying push-to-talk and hands-free capture without
+dictating text into another application.
 
 To prevent future startup, disable the `WA Whisper Voice Typing` scheduled task.
 Turn dictation off with Ctrl+Shift+F1 first so active audio is saved, then end the

@@ -7,6 +7,18 @@ import pytest
 from wa_whisper import windows_hotkeys as hotkeys
 
 
+def test_windows_altgr_maps_to_shared_right_alt(monkeypatch):
+    altgr = object()
+    monkeypatch.setattr(hotkeys.keyboard.Key, "alt_gr", altgr, raising=False)
+    assert hotkeys.normalize_recording_key(altgr) == hotkeys.keyboard.Key.alt_r
+
+
+def test_other_keys_are_not_changed(monkeypatch):
+    monkeypatch.setattr(hotkeys.keyboard.Key, "alt_gr", object(), raising=False)
+    other = object()
+    assert hotkeys.normalize_recording_key(other) is other
+
+
 def test_right_alt_is_queued_before_suppression(monkeypatch):
     events = []
     converted = (0x100, 0xA5)
