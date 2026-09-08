@@ -22,9 +22,12 @@ from typing import Any, Mapping, Optional, Tuple
 
 from .audio_cues import play_system_bell
 from .compute_mode import ComputeModeError, compute_mode_values, resolve_compute_device
+from .control_server import ControlServer
+from .control_state import HandoffController
 from .dictation_archive import DictationArchive, DictationRecord, format_timestamp, utc_now
 from .hotkeys import CaptureEndReason, CaptureResult, PushToTalkHotkey
 from .log_utils import DEFAULT_LOG_PATH, write_log
+from .processing_queue import CaptureQueue, CaptureWorker, DrainBarrier
 from .recorder import Recorder, RecorderStats
 from .recovery_queue import insert_transcript_into_recovery_queue, skipped_recovery_queue_result
 from .text_postprocess import postprocess_text
@@ -107,7 +110,7 @@ class CaptureTask:
     created_at: datetime
 
 
-TaskItem = Optional[CaptureTask]
+TaskItem = Optional[CaptureTask | DrainBarrier]
 INTERRUPTION_REASONS = {
     CaptureEndReason.SERVICE_SHUTDOWN: "service_shutdown",
     CaptureEndReason.ESCAPE: "escape",
@@ -274,7 +277,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
     archive = DictationArchive()
 
-    task_queue: "queue.Queue[TaskItem]" = queue.Queue()
+    task_queue: "queue.Queue[TaskItem]" = CaptureQueue()
     stop_event = threading.Event()
     shutdown_coordinator = ShutdownCoordinator(
         task_queue=task_queue,
@@ -282,38 +285,27 @@ def main(argv: Optional[list[str]] = None) -> None:
         log_path=log_path,
     )
 
-    def worker_loop() -> None:
-        while True:
-            try:
-                item = task_queue.get(timeout=0.1)
-            except queue.Empty:
-                if stop_event.is_set():
-                    continue
-                continue
-            if item is None:
-                task_queue.task_done()
-                break
-            process_capture(
-                audio_path=item.audio_path,
-                stats=item.stats,
-                created_at=item.created_at,
-                backend=backend,
-                voice_isolation=voice_isolation,
-                log_path=log_path,
-                append_space=True,
-                normalize_numbers=not args.disable_number_normalization,
-                normalize_acronyms=not args.disable_acronym_normalization,
-                ensure_punct=not args.disable_punctuation,
-                xdotool_bin=xdotool_bin,
-                enable_beep=not args.disable_complete_beep,
-                injection_mode=injection_mode,
-                orca_daemon_dir=args.orca_daemon_dir,
-                orca_session_id=args.orca_session_id,
-                archive=archive,
-            )
-            task_queue.task_done()
+    def process_task(item: CaptureTask) -> None:
+        process_capture(
+            audio_path=item.audio_path,
+            stats=item.stats,
+            created_at=item.created_at,
+            backend=backend,
+            voice_isolation=voice_isolation,
+            log_path=log_path,
+            append_space=True,
+            normalize_numbers=not args.disable_number_normalization,
+            normalize_acronyms=not args.disable_acronym_normalization,
+            ensure_punct=not args.disable_punctuation,
+            xdotool_bin=xdotool_bin,
+            enable_beep=not args.disable_complete_beep,
+            injection_mode=injection_mode,
+            orca_daemon_dir=args.orca_daemon_dir,
+            orca_session_id=args.orca_session_id,
+            archive=archive,
+        )
 
-    worker = threading.Thread(target=worker_loop, daemon=True)
+    worker = CaptureWorker(task_queue, process_task, log_path)
     worker.start()
 
     def handle_capture(result: CaptureResult) -> None:
@@ -352,6 +344,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
+    control = ControlServer(HandoffController(
+        hotkey,
+        worker,
+        lambda: shutdown_coordinator.request(None, end_reason=CaptureEndReason.SERVICE_SHUTDOWN),
+    ))
     try:
         if hotkey.start():
             write_log(
@@ -359,6 +356,11 @@ def main(argv: Optional[list[str]] = None) -> None:
                 "Left Ctrl + Right Alt hands-free)",
                 log_path,
             )
+        try:
+            control.start()
+            write_log(f"Cooperative handoff control ready: {control.path}", log_path)
+        except OSError as exc:
+            write_log(f"Cooperative handoff control unavailable: {exc}", log_path)
         stop_event.wait()
     finally:
         shutdown_coordinator.request(
@@ -367,6 +369,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         )
         task_queue.join()
         worker.join(timeout=2.0)
+        control.close()
         write_log("wa_whisper stopped", log_path)
 
 
