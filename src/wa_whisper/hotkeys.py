@@ -24,6 +24,7 @@ from .x11_key_shield import X11KeyShield
 DEFAULT_HOTKEY_REPRESS_GRACE_SECONDS = 1.0
 HOTKEY_RELEASE_TIMEOUT_SECONDS = 5.0
 AUDIO_CONTROL_TIMEOUT_SECONDS = 1.0
+QUIESCE_CANCEL_POLL_SECONDS = 0.1
 
 
 class RecordingMode(Enum):
@@ -289,8 +290,63 @@ class PushToTalkHotkey:
         self._exit_requested = False
         self._lifecycle_closed = False
         self._listening_resources_active = False
+        self._quiesce_token: str | None = None
         self._lock = threading.RLock()
         self._state_changed = threading.Condition(self._lock)
+
+    def begin_quiesce(self, token: str) -> None:
+        """Prevent new captures while allowing an active capture to finish."""
+        if not isinstance(token, str) or not token:
+            raise ValueError("Quiescence requires a nonempty operation token")
+        with self._state_changed:
+            if self._lifecycle_closed:
+                raise RuntimeError("Hotkey lifecycle is closed")
+            if self._quiesce_token not in (None, token):
+                raise RuntimeError("Another operation owns capture quiescence")
+            self._quiesce_token = token
+            self._state_changed.notify_all()
+
+    def wait_capture_idle(
+        self,
+        token: str,
+        deadline: float,
+        cancelled: Callable[[], bool],
+    ) -> None:
+        """Wait through finalization and its callback under the caller's gate."""
+        with self._state_changed:
+            while True:
+                if cancelled():
+                    raise InterruptedError("Capture quiescence was cancelled")
+                if self._quiesce_token != token:
+                    raise InterruptedError("Capture quiescence ownership was released")
+                if self._lifecycle_closed:
+                    raise RuntimeError("Hotkey lifecycle is closed")
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise TimeoutError("Timed out waiting for the active capture")
+                if self._mode is RecordingMode.IDLE and not self._finalizing_capture:
+                    return
+                self._state_changed.wait(
+                    timeout=min(remaining_seconds, QUIESCE_CANCEL_POLL_SECONDS)
+                )
+
+    def cancel_quiesce(self, token: str) -> None:
+        """Reopen capture admission only for the operation that closed it."""
+        with self._state_changed:
+            if self._quiesce_token == token:
+                self._quiesce_token = None
+                self._state_changed.notify_all()
+
+    def capture_state(self) -> dict[str, str | bool]:
+        """Return lifecycle flags without capture content or operation tokens."""
+        with self._state_changed:
+            return {
+                "mode": self._mode.value,
+                "recording": self._mode is not RecordingMode.IDLE,
+                "finalizing": self._finalizing_capture,
+                "quiescing": self._quiesce_token is not None,
+                "closed": self._lifecycle_closed,
+            }
 
     def _create_listener(self) -> "keyboard.Listener | EvdevKeyListener":
         """Pick a hotkey backend that can actually see keys in this session.
@@ -630,6 +686,8 @@ class PushToTalkHotkey:
                 self._state_changed.wait()
 
     def _ignored_press_reason(self, now: float) -> str | None:
+        if self._quiesce_token is not None:
+            return "while capture admission is quiesced"
         if self._finalizing_capture:
             return "during capture finalization"
         remaining_grace_seconds = self._ignore_presses_until - now

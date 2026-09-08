@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Run the lightweight control client directly from this checkout."""
+
+import importlib
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+raise SystemExit(importlib.import_module("wa_whisper.control_cli").main())
