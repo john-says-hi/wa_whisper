@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import whisper
 
+from .admission import ensure_process_admission, new_capture_reason
 from .log_utils import write_log
 
 DEFAULT_MODEL_NAME = "large-v3"
@@ -68,7 +69,15 @@ class WhisperBackend:
         self._device = self._resolve_device(config.device)
         self._fp16 = config.fp16 if config.fp16 is not None else self._device != "cpu"
         self._lock = threading.Lock()
+        self._cooperative_capture = False
         self._log_compute_selection()
+
+    def enable_cooperative_capture(self) -> None:
+        """Called only after the service's quiesce control endpoint is ready."""
+        self._cooperative_capture = True
+
+    def capture_admission_reason(self) -> str | None:
+        return new_capture_reason() if self._device.startswith("cuda") else None
 
     def _resolve_device(self, requested: Optional[str]) -> str:
         if requested:
@@ -108,6 +117,8 @@ class WhisperBackend:
         with self._lock:
             if self._model is not None:
                 return
+            if self._device.startswith("cuda") and not self._cooperative_capture:
+                ensure_process_admission()
             self._config.cache_dir.mkdir(parents=True, exist_ok=True)
             write_log(
                 f"Loading Whisper model {self._config.model_name} on {self._device}",

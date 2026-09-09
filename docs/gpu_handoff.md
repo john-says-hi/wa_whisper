@@ -78,6 +78,43 @@ job's lifetime. If Whisper was already off, the job leaves it off. Restarting
 Whisper does not change its persisted compute mode. Its model loads lazily on
 the next transcription.
 
+## Shared local-media admission
+
+Optional `~/.config/local_media/admission.json` enables the shared foreground
+queue. It contains `enabled`, the absolute local-media `module_root` (`src`),
+and its `database` path. Missing or disabled configuration keeps the previous
+standalone behavior without requiring the local-media package. An enabled but
+unavailable runtime blocks new GPU captures with a clear log reason.
+
+Every new GPU dictation checks this queue under the capture state lock. Active
+or waiting foreground work blocks new push-to-talk and hands-free recording.
+Release and the hands-free completion chord still finish accepted audio. The
+accepted capture and processing queue never wait for a new foreground ticket:
+the media owner may already hold that ticket while waiting for `quiesce_stop`
+to finish. RAM-mode dictation does not consult the GPU queue.
+
+The shared queue orders **foreground allocations**. Idle Whisper can retain
+its background model until the existing Mimic/media handoff drains and stops
+it. A small Star Trek foreground brain may coexist with that resident model.
+This is a cooperative arrangement, not an operating-system GPU allocation
+barrier. The media supervisor still checks actual GPU memory after quiescence.
+
+Service startup stays CPU-only and does not wait for a foreground claim.
+This allows the coordinator to restore Whisper before releasing its ticket.
+The control endpoint starts before hotkeys are enabled; when shared admission
+is enabled, an unavailable endpoint prevents the listener from starting.
+Manual service starts therefore remain unloaded while new captures are gated.
+
+Standalone `WhisperBackend` calls and the smoke-test utility acquire foreground
+admission before their first GPU model load. They retain ownership until process
+death because Torch may keep CUDA memory after Python model objects are dropped.
+The queue recovers those explicitly marked utility tickets only after their
+recorded process and any attached children have exited.
+
+Roll out this source together with the shared coordinator, restarting only at
+an agreed idle point. No launcher, service, running process, or model cache is
+changed by this source integration. Existing live GPU qualification remains owed.
+
 ## Desktop deployment and rollback
 
 This feature is developed from the running desktop snapshot in a separate

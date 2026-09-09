@@ -50,6 +50,8 @@ without transcribing or injecting it.
 For a recording-safe GPU handoff to Mimic, see
 [Cooperative desktop GPU handoff](gpu_handoff.md). Its local control client waits
 for active dictation and pending processing before stopping the service.
+The same guide covers the optional shared local-media queue, new-capture gating,
+and process-lifetime admission for standalone GPU utilities.
 
 `wa_whisper` has two restart-based compute modes:
 

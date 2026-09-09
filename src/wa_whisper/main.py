@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
 
 from .audio_cues import play_system_bell
+from .admission import enabled as shared_admission_enabled
 from .compute_mode import ComputeModeError, compute_mode_values, resolve_compute_device
 from .control_server import ControlServer
 from .control_state import HandoffController
@@ -332,6 +333,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         exit_on_esc=args.exit_on_esc,
         on_exit=handle_exit,
         enable_hotkey_shield=not args.no_hotkey_shield,
+        capture_admission=backend.capture_admission_reason,
     )
     shutdown_coordinator.bind_hotkey(hotkey)
 
@@ -350,17 +352,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         lambda: shutdown_coordinator.request(None, end_reason=CaptureEndReason.SERVICE_SHUTDOWN),
     ))
     try:
-        if hotkey.start():
-            write_log(
-                "Ready for dictation (Right Alt push-to-talk; "
-                "Left Ctrl + Right Alt hands-free)",
-                log_path,
-            )
-        try:
-            control.start()
-            write_log(f"Cooperative handoff control ready: {control.path}", log_path)
-        except OSError as exc:
-            write_log(f"Cooperative handoff control unavailable: {exc}", log_path)
+        start_capture_service(control, hotkey, backend, log_path)
         stop_event.wait()
     finally:
         shutdown_coordinator.request(
@@ -371,6 +363,24 @@ def main(argv: Optional[list[str]] = None) -> None:
         worker.join(timeout=2.0)
         control.close()
         write_log("wa_whisper stopped", log_path)
+
+
+def start_capture_service(control, hotkey, backend, log_path: Path) -> None:
+    """Start the CPU control path before admitting any microphone capture."""
+    try:
+        control.start()
+        backend.enable_cooperative_capture()
+        write_log(f"Cooperative handoff control ready: {control.path}", log_path)
+    except OSError as exc:
+        write_log(f"Cooperative handoff control unavailable: {exc}", log_path)
+        if shared_admission_enabled():
+            raise RuntimeError("Shared GPU admission requires the Whisper handoff endpoint") from exc
+    if hotkey.start():
+        write_log(
+            "Ready for dictation (Right Alt push-to-talk; "
+            "Left Ctrl + Right Alt hands-free)",
+            log_path,
+        )
 
 
 def handle_capture_result(
