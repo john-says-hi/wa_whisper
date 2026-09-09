@@ -259,6 +259,7 @@ class PushToTalkHotkey:
         on_exit: Callable[[CaptureEndReason], None] | None = None,
         enable_hotkey_shield: bool = True,
         hotkey_repress_grace_seconds: float = DEFAULT_HOTKEY_REPRESS_GRACE_SECONDS,
+        capture_admission: Callable[[], str | None] | None = None,
     ) -> None:
         self._recorder = recorder
         self._silence_timeout = silence_timeout
@@ -266,6 +267,7 @@ class PushToTalkHotkey:
         self._log_path = log_path
         self._exit_on_esc = exit_on_esc
         self._on_exit = on_exit
+        self._capture_admission = capture_admission
         self._mute_controller = AudioMuteController(log_path) if enable_audio_mute else None
         # The shield is an X11 root-window grab. Under Wayland there is no root
         # window to grab and the Xlib call fails, so it is skipped entirely --
@@ -693,6 +695,11 @@ class PushToTalkHotkey:
         remaining_grace_seconds = self._ignore_presses_until - now
         if remaining_grace_seconds > 0:
             return f"for {remaining_grace_seconds:.2f}s grace period"
+        if self._capture_admission is not None:
+            try:
+                return self._capture_admission()
+            except Exception as exc:
+                return f"because GPU capture admission failed: {exc}"
         return None
 
     def _mute_audio(self) -> None:
