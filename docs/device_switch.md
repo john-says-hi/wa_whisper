@@ -64,6 +64,35 @@ Requests have five-second timeouts, heartbeats run every five seconds, and lease
 expire after twenty seconds. Switch preparation/drain is bounded to five minutes.
 The broker preserves per-request decoding settings and rejects unknown options.
 
+## Laptop inference engine
+
+The laptop broker uses faster-whisper/CTranslate2 with the full large-v3 model in
+FP16. Desktop inference continues to use OpenAI Whisper. English, beam size five,
+temperature zero, prompts and per-recording decoding options are preserved. VAD
+filtering is disabled and segment timestamps remain enabled. Individual transcripts
+can differ between engines; compare normal dictation before judging quality.
+
+The converted model is cached under
+`C:\Users\John\.cache\huggingface\hub\models--Systran--faster-whisper-large-v3`
+(approximately 3.09 GB). The existing environment includes faster-whisper and its
+CTranslate2 dependency; CUDA 12/cuDNN 9 libraries are supplied by the installed
+PyTorch CUDA package. Readiness includes actual GPU warm-up, not just construction
+of the lazy transcription iterator. CUDA out-of-memory failures retain the existing
+spoken memory-full and recording-recovery behavior.
+
+To restore the prior laptop engine, stop dictation, set `"engine": "openai"` in
+the laptop's `~/.config/wa_whisper/broker.json`, and restart `WA Whisper Model Broker`.
+Use `"engine": "faster-whisper"` or omit the key for the optimized engine. Preserve
+the other broker settings. The source, full model, queues and device-switch behavior
+remain compatible with either engine.
+
+On the installed RTX 3080 Ti laptop, a sequential comparison of the same 44.8-second
+recording measured 17.91 seconds for faster-whisper versus 50.57 seconds for OpenAI
+Whisper (2.82x faster), with identical transcript text. Load plus warm-up measured
+18.59 versus 60.95 seconds. This is one sample, not a guarantee for other recordings.
+The comparison report is retained at
+`C:\Users\John\Documents\wa_whisper_validation\faster_whisper\comparison.json`.
+
 ## Outages and recovery
 
 Laptop mode stays selected during a disconnect and reconnects in the background.
@@ -106,7 +135,8 @@ archive recovery, hotkeys, capture drain, Windows power and GPU handoff.
 Live checks in the implementation session verified large-v3 CUDA transcription
 over SSH, desktop archive persistence and native text insertion, switching through
 the keyboard path, and desktop model release. The final installed destination is
-laptop, ready, with no desktop inference PID. Laptop microphone remains off.
+laptop. After the faster-whisper update, dictation is left off for fresh user
+startup; the broker remains available and its unleased inference worker unloads.
 
 User acceptance still includes speaking into the normal microphone through both
 destinations, concurrent laptop microphone use, and physically unplugging Ethernet

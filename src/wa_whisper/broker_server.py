@@ -65,7 +65,11 @@ def main():
     settings = broker_settings()
     token = broker_token(settings)
     root = Path.home() / ".cache/wa_whisper"
-    model = ModelProcess(WhisperConfig(device="cuda", compute_mode="gpu", fp16=True), root / "broker_model.log")
+    engine = settings.get("engine", "faster-whisper")
+    if engine not in ("openai", "faster-whisper"):
+        raise ValueError(f"Unknown broker inference engine: {engine}")
+    config = WhisperConfig(device="cuda", compute_mode="gpu", fp16=True, engine=engine)
+    model = ModelProcess(config, root / "broker_model.log")
     # Bind before starting the scheduler: a duplicate broker cannot touch live spool files.
     class DeferredState:
         def request(self, request):

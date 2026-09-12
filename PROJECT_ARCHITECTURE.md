@@ -10,6 +10,7 @@ loads dictation dependencies lazily so control clients need no Torch import.
 | `recorder.py` | Microphone capture and finalized WAV files |
 | `processing_queue.py` | Sequential capture processing and completion barriers |
 | `whisper_backend.py` | Lazy model loading and transcription |
+| `faster_whisper_backend.py` | Full-model CTranslate2 loading, decoding adaptation and segment conversion |
 | `dictation_archive.py`, `recovery_queue.py` | Durable audio/text recovery and CopyQ recovery |
 | `control_state.py` | Lease ownership, capture/processing drain, shutdown commitment |
 | `control_server.py`, `control_protocol.py`, `control_cli.py` | Private local control transport and CLI |
@@ -36,6 +37,14 @@ owns SSH, heartbeats and the lightweight Windows client. `device_recovery.py`
 retries desktop archive records without delayed text injection. `device_config.py`
 persists destination and connection settings; `device_notices.py` plays cached
 announcements. See [operations and rollback](docs/device_switch.md).
+
+The laptop broker defaults to faster-whisper with full large-v3 FP16; desktop
+inference retains OpenAI Whisper. `WhisperConfig.engine` selects the implementation
+inside the same disposable worker. Both engines share decoding options and the
+WhisperResult contract. Warm-up consumes faster-whisper's lazy segment iterator
+before readiness is published. Model disposal, leases and ordered queues retain
+their existing ownership boundaries. Broker configuration can select `openai` for
+rollback without replacing the deployed source.
 
 Device transfers gate inference rather than microphone admission. The existing
 CaptureWorker FIFO holds completed recordings until the switch settles; the

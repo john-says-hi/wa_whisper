@@ -8,11 +8,31 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 
+def create_backend(config, log_path):
+    from .whisper_backend import WhisperBackend
+
+    if config.engine == "openai":
+        return WhisperBackend(config, log_path)
+    if config.engine == "faster-whisper":
+        from .faster_whisper_backend import FasterWhisperBackend
+
+        return FasterWhisperBackend(config, log_path)
+    raise ValueError(f"Unknown Whisper engine: {config.engine}")
+
+
+def inference_error_code(exc):
+    import torch
+
+    if isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower():
+        return "memory_full"
+    return "inference_failed"
+
+
 def main() -> None:
     from .worker_guard import watch_parent
     if len(sys.argv) == 3 and sys.argv[1] == "--parent-pid":
         watch_parent(int(sys.argv[2]))
-    from .whisper_backend import WhisperBackend, WhisperConfig
+    from .whisper_backend import WhisperConfig
 
     backend = None
     output = sys.stdout
@@ -23,15 +43,13 @@ def main() -> None:
                 if request["command"] == "load":
                     config = request["config"]
                     config["cache_dir"] = Path(config["cache_dir"])
-                    backend = WhisperBackend(WhisperConfig(**config), Path(request["log_path"]))
+                    backend = create_backend(WhisperConfig(**config), Path(request["log_path"]))
                     # The parent owns admission and the lifetime of this child.
                     base_config = backend._config
                     backend.enable_cooperative_capture()
                     backend.load()
                     if request.get("warmup", False):
-                        import numpy as np
-                        backend._model.transcribe(np.zeros(16000, dtype=np.float32), language="en",
-                                                  fp16=backend._fp16, beam_size=backend._config.beam_size)
+                        backend.warmup()
                     result = backend.archive_metadata()
                 elif request["command"] == "transcribe" and backend is not None:
                     backend._config = replace(base_config, **request.get("decode_options", {}))
@@ -40,8 +58,7 @@ def main() -> None:
                     raise ValueError("Unsupported inference command")
             response = {"ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001 - serialize third-party inference errors at the process boundary
-            import torch
-            code = "memory_full" if isinstance(exc, torch.cuda.OutOfMemoryError) else "inference_failed"
+            code = inference_error_code(exc)
             response = {"ok": False, "error": {"code": code, "message": str(exc)}}
         output.write(json.dumps(response) + "\n")
         output.flush()

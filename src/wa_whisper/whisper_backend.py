@@ -36,6 +36,7 @@ class WhisperConfig:
     device: Optional[str] = None
     compute_mode: Optional[str] = None
     fp16: Optional[bool] = None
+    engine: str = "openai"
 
 
 @dataclass(slots=True)
@@ -104,6 +105,7 @@ class WhisperBackend:
     def archive_metadata(self) -> Dict[str, Any]:
         """Return stable backend details for dictation recovery metadata."""
         return {
+            "engine": self._config.engine,
             "model_name": self._config.model_name,
             "device": self._device,
             "compute_mode": self._config.compute_mode,
@@ -136,26 +138,8 @@ class WhisperBackend:
         self.load()
         assert self._model is not None  # Guard for type checkers
 
-        kwargs: Dict[str, Any] = {
-            "language": "en",
-            "task": "transcribe",
-            "beam_size": self._config.beam_size,
-            "best_of": self._config.best_of,
-            "temperature": self._config.temperature,
-            "compression_ratio_threshold": self._config.compression_ratio_threshold,
-            "condition_on_previous_text": self._config.condition_on_previous_text,
-            "fp16": self._fp16,
-        }
-        if self._config.patience is not None:
-            kwargs["patience"] = self._config.patience
-        if self._config.logprob_threshold is not None:
-            kwargs["logprob_threshold"] = self._config.logprob_threshold
-        if self._config.no_speech_threshold is not None:
-            kwargs["no_speech_threshold"] = self._config.no_speech_threshold
-        if self._config.initial_prompt:
-            kwargs["initial_prompt"] = self._config.initial_prompt
-        if self._config.suppress_tokens is not None:
-            kwargs["suppress_tokens"] = self._config.suppress_tokens
+        kwargs = self._decode_options()
+        kwargs["fp16"] = self._fp16
 
         write_log(f"Transcribing {audio_path}", self._log_path)
         result = self._model.transcribe(str(audio_path), **kwargs)
@@ -177,3 +161,33 @@ class WhisperBackend:
             "duration": result.get("duration"),
         }
         return WhisperResult(text=text, segments=segments, info=info)
+
+    def warmup(self) -> None:
+        import numpy as np
+
+        self.load()
+        self._model.transcribe(np.zeros(16000, dtype=np.float32), language="en",
+                               fp16=self._fp16, beam_size=self._config.beam_size)
+
+    def _decode_options(self) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {
+            "language": "en",
+            "task": "transcribe",
+            "beam_size": self._config.beam_size,
+            "best_of": self._config.best_of,
+            "temperature": self._config.temperature,
+            "compression_ratio_threshold": self._config.compression_ratio_threshold,
+            "condition_on_previous_text": self._config.condition_on_previous_text,
+        }
+        if self._config.patience is not None:
+            kwargs["patience"] = self._config.patience
+        if self._config.logprob_threshold is not None:
+            kwargs["logprob_threshold"] = self._config.logprob_threshold
+        if self._config.no_speech_threshold is not None:
+            kwargs["no_speech_threshold"] = self._config.no_speech_threshold
+        if self._config.initial_prompt:
+            kwargs["initial_prompt"] = self._config.initial_prompt
+        if self._config.suppress_tokens is not None:
+            kwargs["suppress_tokens"] = self._config.suppress_tokens
+
+        return kwargs
