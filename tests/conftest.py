@@ -1,7 +1,16 @@
 import math
+import os
 import sys
 import types
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+# PushToTalkHotkey picks its keyboard backend from the live session: X11 gets
+# pynput, Wayland gets evdev. Without pinning this, the suite would pass or fail
+# depending on which desktop the developer happened to log into. Tests that
+# exercise the Wayland path set this themselves.
+os.environ["XDG_SESSION_TYPE"] = "x11"
 
 pynput_module = types.ModuleType("pynput")
 keyboard_module = types.ModuleType("pynput.keyboard")
@@ -9,7 +18,16 @@ keyboard_module = types.ModuleType("pynput.keyboard")
 
 class _Key:
     alt_r = "alt_r"
+    ctrl = "ctrl_l"
+    ctrl_l = ctrl
+    ctrl_r = "ctrl_r"
     esc = "esc"
+    shift_l = "shift_l"
+    shift_r = "shift_r"
+    alt_l = "alt_l"
+    f1 = "f1"
+    cmd_l = "cmd_l"
+    cmd_r = "cmd_r"
 
 
 class _Listener:
@@ -85,6 +103,20 @@ class _DummyStream:
 
 sd_module.PortAudioError = _PortAudioError
 sd_module.InputStream = _DummyStream
+sd_module.default = types.SimpleNamespace(device=[0, 0])
+
+
+def _query_devices(device=None, *args, **_kwargs):
+    devices = [{"name": "default", "max_input_channels": 1}]
+    if args:
+        return devices[0]
+    if device is None:
+        return devices
+    return devices[device]
+
+
+sd_module.query_devices = _query_devices
+sd_module.check_input_settings = lambda *args, **kwargs: None
 
 sys.modules.setdefault("sounddevice", sd_module)
 

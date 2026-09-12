@@ -10,9 +10,11 @@ from typing import Any, Dict, List, Optional
 import torch
 import whisper
 
+from .admission import ensure_process_admission, new_capture_reason
 from .log_utils import write_log
 
 DEFAULT_MODEL_NAME = "large-v3"
+DEFAULT_ENGINE = "faster-whisper"
 DEFAULT_MODEL_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
 
 
@@ -33,6 +35,9 @@ class WhisperConfig:
     condition_on_previous_text: bool = False
     cache_dir: Path = DEFAULT_MODEL_CACHE
     device: Optional[str] = None
+    compute_mode: Optional[str] = None
+    fp16: Optional[bool] = None
+    engine: str = DEFAULT_ENGINE
 
 
 @dataclass(slots=True)
@@ -59,26 +64,66 @@ class WhisperResult:
 class WhisperBackend:
     """Lazy-loading wrapper that enforces English transcription."""
 
+    ENGINE_NAME = "openai"
+
     def __init__(self, config: WhisperConfig, log_path: Path) -> None:
         self._config = config
         self._log_path = log_path
         self._model: whisper.Whisper | None = None
         self._device = self._resolve_device(config.device)
+        self._fp16 = config.fp16 if config.fp16 is not None else self._device != "cpu"
         self._lock = threading.Lock()
+        self._cooperative_capture = False
+        self._log_compute_selection()
+
+    def enable_cooperative_capture(self) -> None:
+        """Called only after the service's quiesce control endpoint is ready."""
+        self._cooperative_capture = True
+
+    def capture_admission_reason(self) -> str | None:
+        return new_capture_reason() if self._device.startswith("cuda") else None
 
     def _resolve_device(self, requested: Optional[str]) -> str:
         if requested:
+            if self._config.compute_mode == "gpu" and requested == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError(
+                    "gpu compute mode requires CUDA, but torch reports CUDA is unavailable. "
+                    "Run `wa-whisper-mode ram` to switch to CPU/system RAM mode.",
+                )
             return requested
         if torch.cuda.is_available():
             return "cuda"
         write_log("CUDA unavailable; falling back to CPU", self._log_path)
         return "cpu"
 
+    def _log_compute_selection(self) -> None:
+        if self._config.compute_mode:
+            write_log(
+                f"Whisper compute mode {self._config.compute_mode} -> device={self._device} fp16={self._fp16}",
+                self._log_path,
+            )
+            return
+        write_log(f"Whisper device {self._device} fp16={self._fp16}", self._log_path)
+
+    def archive_metadata(self) -> Dict[str, Any]:
+        """Return stable backend details for dictation recovery metadata."""
+        return {
+            "engine": self.ENGINE_NAME,
+            "model_name": self._config.model_name,
+            "device": self._device,
+            "compute_mode": self._config.compute_mode,
+            "fp16": self._fp16,
+            "beam_size": self._config.beam_size,
+            "temperature": self._config.temperature,
+        }
+
     def load(self) -> None:
         """Load the Whisper model if it has not been loaded yet."""
         with self._lock:
             if self._model is not None:
                 return
+            if self._device.startswith("cuda") and not self._cooperative_capture:
+                ensure_process_admission()
             self._config.cache_dir.mkdir(parents=True, exist_ok=True)
             write_log(
                 f"Loading Whisper model {self._config.model_name} on {self._device}",
@@ -96,26 +141,8 @@ class WhisperBackend:
         self.load()
         assert self._model is not None  # Guard for type checkers
 
-        kwargs: Dict[str, Any] = {
-            "language": "en",
-            "task": "transcribe",
-            "beam_size": self._config.beam_size,
-            "best_of": self._config.best_of,
-            "temperature": self._config.temperature,
-            "compression_ratio_threshold": self._config.compression_ratio_threshold,
-            "condition_on_previous_text": self._config.condition_on_previous_text,
-            "fp16": self._device != "cpu",
-        }
-        if self._config.patience is not None:
-            kwargs["patience"] = self._config.patience
-        if self._config.logprob_threshold is not None:
-            kwargs["logprob_threshold"] = self._config.logprob_threshold
-        if self._config.no_speech_threshold is not None:
-            kwargs["no_speech_threshold"] = self._config.no_speech_threshold
-        if self._config.initial_prompt:
-            kwargs["initial_prompt"] = self._config.initial_prompt
-        if self._config.suppress_tokens is not None:
-            kwargs["suppress_tokens"] = self._config.suppress_tokens
+        kwargs = self._decode_options()
+        kwargs["fp16"] = self._fp16
 
         write_log(f"Transcribing {audio_path}", self._log_path)
         result = self._model.transcribe(str(audio_path), **kwargs)
@@ -137,3 +164,33 @@ class WhisperBackend:
             "duration": result.get("duration"),
         }
         return WhisperResult(text=text, segments=segments, info=info)
+
+    def warmup(self) -> None:
+        import numpy as np
+
+        self.load()
+        self._model.transcribe(np.zeros(16000, dtype=np.float32), language="en",
+                               fp16=self._fp16, beam_size=self._config.beam_size)
+
+    def _decode_options(self) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {
+            "language": "en",
+            "task": "transcribe",
+            "beam_size": self._config.beam_size,
+            "best_of": self._config.best_of,
+            "temperature": self._config.temperature,
+            "compression_ratio_threshold": self._config.compression_ratio_threshold,
+            "condition_on_previous_text": self._config.condition_on_previous_text,
+        }
+        if self._config.patience is not None:
+            kwargs["patience"] = self._config.patience
+        if self._config.logprob_threshold is not None:
+            kwargs["logprob_threshold"] = self._config.logprob_threshold
+        if self._config.no_speech_threshold is not None:
+            kwargs["no_speech_threshold"] = self._config.no_speech_threshold
+        if self._config.initial_prompt:
+            kwargs["initial_prompt"] = self._config.initial_prompt
+        if self._config.suppress_tokens is not None:
+            kwargs["suppress_tokens"] = self._config.suppress_tokens
+
+        return kwargs

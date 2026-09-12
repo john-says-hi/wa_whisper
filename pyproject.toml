@@ -32,6 +32,8 @@ dev = [
 
 [project.scripts]
 wa-whisper = "wa_whisper.main:main"
+wa-whisper-mode = "wa_whisper.mode_cli:main"
+wa-whisper-control = "wa_whisper.control_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

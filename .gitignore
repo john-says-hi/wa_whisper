@@ -9,3 +9,5 @@ __pycache__/
 .vscode/
 .swp
 wa_whisper_runtime.log
+state/
+.pytest_cache/
