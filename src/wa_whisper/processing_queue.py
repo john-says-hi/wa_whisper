@@ -25,6 +25,10 @@ class CaptureQueue(queue.Queue):
         self._admission = threading.Lock()
         self._closing = False
 
+    def waiting_recordings(self) -> int:
+        with self.mutex:
+            return sum(item is not None and not isinstance(item, DrainBarrier) for item in self.queue)
+
     def put(self, item, block: bool = True, timeout: float | None = None) -> None:
         with self._admission:
             if isinstance(item, DrainBarrier) and self._closing:
@@ -52,7 +56,8 @@ class CaptureWorker:
     def status(self) -> dict[str, bool | int]:
         return {
             "processing": self._active.is_set(),
-            "queued_items": self._tasks.qsize(),
+            "queued_items": (self._tasks.waiting_recordings() if isinstance(self._tasks, CaptureQueue)
+                             else self._tasks.qsize()),
             "worker_alive": self._thread.is_alive(),
             "worker_failed": self._failed.is_set(),
         }

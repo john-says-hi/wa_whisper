@@ -10,6 +10,7 @@ from pathlib import Path
 from .log_utils import write_log
 
 PHRASES = {
+    "recording_queue_full": "Recording queue full",
     "transferring_voice": "Transferring voice",
     "voice_ready": "Voice ready",
     "desktop_online": "Desktop voice online",

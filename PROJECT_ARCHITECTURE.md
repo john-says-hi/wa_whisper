@@ -42,3 +42,9 @@ CaptureWorker FIFO holds completed recordings until the switch settles; the
 inference lock protects active transcription and model replacement. Cancellation
 wakes waiting processing so shutdown can archive remaining recordings. External
 GPU handoff still uses capture quiescence and a queue drain.
+
+`recording_admission.py` combines the seven-waiting-recording limit with existing
+GPU admission before either microphone hotkey starts capture. CaptureQueue counts
+only audio jobs; control barriers and shutdown sentinels remain unbounded so queue
+capacity cannot obstruct graceful shutdown. The microphone is the single producer,
+and finalization completes enqueueing before the next recording is admitted.

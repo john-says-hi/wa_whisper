@@ -18,6 +18,21 @@ recording itself does not delay the transfer. Shutdown preserves queued audio
 through the normal archive/recovery path. Cached WAV announcements load no speech
 model and wait until microphone capture/finalization ends before speaking.
 
+## Recording while transcription is busy
+
+Both Right Alt push-to-talk and Left Ctrl + Right Alt hands-free can record again
+while earlier audio is processing. The existing one-second accidental-repress
+protection and capture-finalization guard remain; a two-second pause is sufficient
+once the previous WAV has finished saving. There is one processing slot and up to
+seven completed recordings waiting in FIFO order, including during a GPU transfer.
+
+When seven are waiting, a new recording attempt says “Recording queue full” in the
+same cached voice and leaves the microphone idle. Accepted recordings are never
+evicted to make room. Once the worker takes another item, recording is available
+again. Results use the existing transcript, CopyQ and insertion path in order.
+Control drain/shutdown markers do not consume recording slots. Status `queued_items`
+reports waiting recordings only, separate from the `processing` flag.
+
 ## Connection and shared ownership
 
 The Windows sign-in task `WA Whisper Model Broker` owns one inference worker.

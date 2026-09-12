@@ -30,6 +30,7 @@ from .hotkeys import CaptureEndReason, CaptureResult, PushToTalkHotkey
 from .log_utils import DEFAULT_LOG_PATH, write_log
 from .processing_queue import CaptureQueue, CaptureWorker, DrainBarrier
 from .recorder import Recorder, RecorderStats
+from .recording_admission import RecordingAdmission
 from .recovery_queue import insert_transcript_into_recovery_queue, skipped_recovery_queue_result
 from .text_postprocess import postprocess_text
 from .voice_isolation import VoiceIsolationPipeline
@@ -335,7 +336,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         exit_on_esc=args.exit_on_esc,
         on_exit=handle_exit,
         enable_hotkey_shield=not args.no_hotkey_shield,
-        capture_admission=backend.capture_admission_reason,
+        capture_admission=RecordingAdmission(task_queue, backend),
         on_device_switch=backend.request_switch,
     )
     shutdown_coordinator.bind_hotkey(hotkey)
