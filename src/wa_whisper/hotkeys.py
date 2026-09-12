@@ -260,6 +260,7 @@ class PushToTalkHotkey:
         enable_hotkey_shield: bool = True,
         hotkey_repress_grace_seconds: float = DEFAULT_HOTKEY_REPRESS_GRACE_SECONDS,
         capture_admission: Callable[[], str | None] | None = None,
+        on_device_switch: Callable[[], object] | None = None,
     ) -> None:
         self._recorder = recorder
         self._silence_timeout = silence_timeout
@@ -268,6 +269,8 @@ class PushToTalkHotkey:
         self._exit_on_esc = exit_on_esc
         self._on_exit = on_exit
         self._capture_admission = capture_admission
+        self._on_device_switch = on_device_switch
+        self._device_keys = set()
         self._mute_controller = AudioMuteController(log_path) if enable_audio_mute else None
         # The shield is an X11 root-window grab. Under Wayland there is no root
         # window to grab and the Xlib call fails, so it is skipped entirely --
@@ -470,6 +473,17 @@ class PushToTalkHotkey:
         if injected:
             return
 
+        with self._lock:
+            repeated = key in self._device_keys
+            self._device_keys.add(key)
+            chord = {keyboard.Key.ctrl_l, getattr(keyboard.Key, "shift_l", "shift_l"),
+                     getattr(keyboard.Key, "alt_l", "alt_l"), getattr(keyboard.Key, "f1", "f1")}
+            if (self._on_device_switch and self._events_enabled and not self._lifecycle_closed
+                    and key == getattr(keyboard.Key, "f1", "f1") and not repeated
+                    and self._device_keys == chord):
+                self._on_device_switch()
+                return
+
         if key == keyboard.Key.ctrl_l:
             with self._state_changed:
                 if self._events_enabled and not self._left_ctrl_down:
@@ -499,6 +513,9 @@ class PushToTalkHotkey:
     ) -> None:
         if injected:
             return
+
+        with self._lock:
+            self._device_keys.discard(key)
 
         if key == keyboard.Key.ctrl_l:
             with self._state_changed:

@@ -4,3 +4,5 @@
 - [Architecture](PROJECT_ARCHITECTURE.md)
 - [Cooperative desktop GPU handoff](docs/gpu_handoff.md)
 - [Original product brief](Whisper.md)
+
+- [Desktop/laptop GPU switching and recovery](docs/device_switch.md)

@@ -16,7 +16,8 @@ class HandoffBusyError(RuntimeError):
 
 
 class HandoffController:
-    def __init__(self, capture, worker: CaptureWorker, shutdown: Callable[[], None]) -> None:
+    def __init__(self, capture, worker: CaptureWorker, shutdown: Callable[[], None], devices=None) -> None:
+        self.devices = devices
         self._capture = capture
         self._worker = worker
         self._shutdown = shutdown
@@ -25,6 +26,7 @@ class HandoffController:
 
     def status(self) -> dict:
         return {
+            **(self.devices.status() if self.devices else {}),
             "pid": os.getpid(),
             **self._capture.capture_state(),
             **self._worker.status(),

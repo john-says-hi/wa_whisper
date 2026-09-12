@@ -12,7 +12,7 @@ from .control_protocol import default_socket_path, request_control
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect Whisper or finish dictation before stopping it.")
-    parser.add_argument("command", choices=["status", "quiesce-stop"])
+    parser.add_argument("command", choices=["status", "quiesce-stop", "switch-device", "cancel-switch"])
     parser.add_argument("--wait-seconds", type=float, default=300)
     parser.add_argument("--socket", type=Path, default=default_socket_path())
     args = parser.parse_args(argv)

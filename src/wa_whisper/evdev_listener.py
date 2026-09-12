@@ -59,11 +59,17 @@ def _key_map(ecodes) -> dict[int, keyboard.Key]:
     never has to synthesise a ``KeyCode`` for ordinary typing — which would mean
     reconstructing keyboard layout and modifier state from scratch.
     """
-    return {
+    mapping = {
         ecodes.KEY_RIGHTALT: keyboard.Key.alt_r,
         ecodes.KEY_LEFTCTRL: keyboard.Key.ctrl_l,
         ecodes.KEY_ESC: keyboard.Key.esc,
     }
+    for code, key in (("KEY_LEFTALT", "alt_l"), ("KEY_LEFTSHIFT", "shift_l"),
+                      ("KEY_RIGHTSHIFT", "shift_r"), ("KEY_RIGHTCTRL", "ctrl_r"),
+                      ("KEY_LEFTMETA", "cmd_l"), ("KEY_RIGHTMETA", "cmd_r"), ("KEY_F1", "f1")):
+        if hasattr(ecodes, code) and hasattr(keyboard.Key, key):
+            mapping[getattr(ecodes, code)] = getattr(keyboard.Key, key)
+    return mapping
 
 
 class EvdevKeyListener:
@@ -87,6 +93,7 @@ class EvdevKeyListener:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._devices: dict[str, object] = {}
+        self._pressed = {}
         self._warned_empty = False
 
     # Lifecycle ----------------------------------------------------------------
@@ -167,6 +174,10 @@ class EvdevKeyListener:
         return len(self._devices)
 
     def _drop_device(self, path: str) -> None:
+        held = self._pressed.pop(path, set())
+        for key in held:
+            if not any(key in keys for keys in self._pressed.values()):
+                self._dispatch(self._on_release, key)
         device = self._devices.pop(path, None)
         if device is None:
             return
@@ -218,6 +229,12 @@ class EvdevKeyListener:
     def _drain_device(self, path: str, device) -> None:
         try:
             for event in device.read():
+                if event.type == getattr(self._ecodes, "EV_SYN", -1):
+                    if event.code == getattr(self._ecodes, "SYN_DROPPED", -1):
+                        for held in list(self._pressed.get(path, set())):
+                            self._dispatch(self._on_release, held)
+                        self._pressed[path] = set()
+                    continue
                 if event.type != self._ecodes.EV_KEY:
                     continue
                 key = self._key_codes.get(event.code)
@@ -225,10 +242,16 @@ class EvdevKeyListener:
                     continue
                 # 1 = press, 0 = release, 2 = autorepeat. Autorepeat would look
                 # like a storm of fresh presses to the state machine.
+                held = self._pressed.setdefault(path, set())
                 if event.value == 1:
-                    self._dispatch(self._on_press, key)
+                    already_held = any(key in keys for keys in self._pressed.values())
+                    held.add(key)
+                    if not already_held:
+                        self._dispatch(self._on_press, key)
                 elif event.value == 0:
-                    self._dispatch(self._on_release, key)
+                    held.discard(key)
+                    if not any(key in keys for keys in self._pressed.values()):
+                        self._dispatch(self._on_release, key)
         except BlockingIOError:
             return
         except OSError as exc:

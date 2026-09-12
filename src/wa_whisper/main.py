@@ -34,6 +34,7 @@ from .recovery_queue import insert_transcript_into_recovery_queue, skipped_recov
 from .text_postprocess import postprocess_text
 from .voice_isolation import VoiceIsolationPipeline
 from .whisper_backend import DEFAULT_MODEL_CACHE, WhisperBackend, WhisperConfig
+from .device_routing import RoutedBackend
 
 
 def positive_int_argument(value: str) -> int:
@@ -260,7 +261,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         fp16=compute_settings.fp16,
     )
 
-    backend = WhisperBackend(config, log_path)
+    backend = RoutedBackend(config, log_path)
     recorder = Recorder(
         sample_rate=args.sample_rate,
         device_index=args.device_index,
@@ -319,6 +320,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         )
 
     def handle_exit(end_reason: CaptureEndReason) -> None:
+        backend.begin_shutdown()
         shutdown_coordinator.request(
             None,
             end_reason=end_reason,
@@ -334,10 +336,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         on_exit=handle_exit,
         enable_hotkey_shield=not args.no_hotkey_shield,
         capture_admission=backend.capture_admission_reason,
+        on_device_switch=backend.request_switch,
     )
     shutdown_coordinator.bind_hotkey(hotkey)
 
     def shutdown(signum: int, _frame) -> None:
+        backend.begin_shutdown()
         shutdown_coordinator.request(
             signum,
             end_reason=CaptureEndReason.SERVICE_SHUTDOWN,
@@ -346,15 +350,18 @@ def main(argv: Optional[list[str]] = None) -> None:
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
+    backend.bind(hotkey, worker, archive)
     control = ControlServer(HandoffController(
         hotkey,
         worker,
         lambda: shutdown_coordinator.request(None, end_reason=CaptureEndReason.SERVICE_SHUTDOWN),
+        devices=backend,
     ))
     try:
         start_capture_service(control, hotkey, backend, log_path)
         stop_event.wait()
     finally:
+        backend.begin_shutdown()
         shutdown_coordinator.request(
             signal.SIGTERM,
             end_reason=CaptureEndReason.SERVICE_SHUTDOWN,
@@ -362,6 +369,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         task_queue.join()
         worker.join(timeout=2.0)
         control.close()
+        backend.close()
         write_log("wa_whisper stopped", log_path)
 
 
@@ -505,9 +513,20 @@ def process_capture(
         log_path=log_path,
     )
     enhanced_path = audio_path
+    recovery = getattr(backend, "recovery", None)
+    persisted = False
     try:
+        if recovery:
+            if archive_record is None:
+                raise RuntimeError("Cannot transcribe until the recording is safely archived")
+            enhanced_path = archive_record.audio_path
+            recovery.begin(archive_record, {
+                "normalize_numbers_enabled": normalize_numbers,
+                "normalize_acronyms_enabled": normalize_acronyms,
+                "ensure_punctuation": ensure_punct, "append_space": append_space,
+            })
         if voice_isolation:
-            enhanced_path = voice_isolation.enhance(audio_path)
+            enhanced_path = voice_isolation.enhance(enhanced_path)
         result = backend.transcribe(enhanced_path)
         text = postprocess_text(
             result.text,
@@ -516,6 +535,10 @@ def process_capture(
             ensure_punctuation=ensure_punct,
             append_space=append_space,
         )
+        if recovery:
+            archive.save_transcript(archive_record, text, whisper_info=result.info)
+            persisted = True
+            backend.acknowledge(archive_record.audio_path)
         if not text.strip():
             recovery_queue_result = skipped_recovery_queue_result()
             update_dictation_archive_record(
@@ -541,6 +564,9 @@ def process_capture(
             log_path=log_path,
         )
         recovery_queue_result = insert_transcript_into_recovery_queue(text, log_path)
+        if recovery and backend._closed.is_set():
+            archive.update_record(archive_record, status="saved_without_injection")
+            return
         injected = inject_text(
             text,
             xdotool_bin,
@@ -573,9 +599,14 @@ def process_capture(
         )
         write_log(f"Capture processing failed: {exc}", log_path)
     finally:
-        if enhanced_path != audio_path and enhanced_path.exists():
+        if recovery and archive_record:
+            recovery.finish(archive_record, persisted)
+        if (enhanced_path != audio_path and enhanced_path.exists()
+                and (archive_record is None or enhanced_path != archive_record.audio_path)):
             enhanced_path.unlink(missing_ok=True)
-        audio_path.unlink(missing_ok=True)
+        # A failed archive must never delete the only surviving audio.
+        if not recovery or archive_record is not None:
+            audio_path.unlink(missing_ok=True)
 
 
 def start_dictation_archive_record(

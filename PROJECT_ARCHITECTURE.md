@@ -25,3 +25,14 @@ normally, and a queue barrier confirms complete processing before the normal
 shutdown path runs. The external Mimic job owns restoring the stopped service;
 Whisper never launches a training or writer workload. See `docs/gpu_handoff.md`
 for protocol, deployment, and ownership boundaries.
+
+## Shared laptop inference
+
+`device_routing.py` owns the destination transaction and desktop admission;
+`model_process.py`, `inference_worker.py` and `worker_guard.py` own disposable CUDA
+processes. `broker_state.py` schedules one laptop model, scoped jobs and client
+leases; `broker_server.py` exposes authenticated loopback RPC. `broker_client.py`
+owns SSH, heartbeats and the lightweight Windows client. `device_recovery.py`
+retries desktop archive records without delayed text injection. `device_config.py`
+persists destination and connection settings; `device_notices.py` plays cached
+announcements. See [operations and rollback](docs/device_switch.md).

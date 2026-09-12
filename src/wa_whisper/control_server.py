@@ -99,6 +99,12 @@ class ControlServer:
                 command, wait = validate_request(read_frame(connection))
                 if command == "status":
                     result = self._controller.status()
+                elif command in ("switch_device", "cancel_switch"):
+                    if self._controller.devices is None:
+                        raise RuntimeError("Device switching is not configured")
+                    action = (self._controller.devices.request_switch if command == "switch_device"
+                              else self._controller.devices.cancel_switch)
+                    result = action()
                 else:
                     result = self._controller.quiesce_stop(wait, lambda: self._cancelled(connection))
                 send_frame(connection, {"ok": True, "result": result})

@@ -42,7 +42,7 @@ def validate_request(request: dict) -> tuple[str, float]:
     if type(request.get("version")) is not int or request["version"] != PROTOCOL_VERSION:
         raise ValueError("Unsupported control protocol version")
     command = request.get("command")
-    if command == "status":
+    if command in ("status", "switch_device", "cancel_switch"):
         return command, 0
     if command != "quiesce_stop":
         raise ValueError("Unknown control command")

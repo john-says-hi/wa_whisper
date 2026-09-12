@@ -22,6 +22,12 @@ class _Key:
     ctrl_l = ctrl
     ctrl_r = "ctrl_r"
     esc = "esc"
+    shift_l = "shift_l"
+    shift_r = "shift_r"
+    alt_l = "alt_l"
+    f1 = "f1"
+    cmd_l = "cmd_l"
+    cmd_r = "cmd_r"
 
 
 class _Listener:

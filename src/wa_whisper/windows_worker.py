@@ -14,7 +14,8 @@ from .hotkeys import CaptureEndReason, CaptureResult
 from .log_utils import DEFAULT_LOG_PATH, write_log
 from .recorder import Recorder
 from .text_postprocess import postprocess_text
-from .whisper_backend import WhisperBackend, WhisperConfig
+from .whisper_backend import WhisperBackend
+from .broker_client import LaptopBackend
 
 STATE_PATH = Path.home() / ".cache" / "wa_whisper" / "windows_status.txt"
 ARCHIVE_ROOT = Path.home() / "Music" / "wa_whisper_recordings"
@@ -56,6 +57,9 @@ def process_capture(capture: CaptureResult, backend: WhisperBackend, stopping: t
         result = backend.transcribe(record / "audio.wav")
         text = postprocess_text(result.text)
         (record / "transcript.txt").write_text(text, encoding="utf-8")
+        acknowledge = getattr(backend, "acknowledge", None)
+        if acknowledge:
+            acknowledge(record / "audio.wav")
         if text and not stopping.is_set():
             from .windows_input import type_text
 
@@ -76,7 +80,7 @@ def main() -> None:
     stopping = threading.Event()
     captures: queue.Queue[CaptureResult] = queue.Queue()
     report("Loading Whisper large-v3 on GPU")
-    backend = WhisperBackend(WhisperConfig(device="cuda", compute_mode="gpu", fp16=True), DEFAULT_LOG_PATH)
+    backend = LaptopBackend(stopping.is_set)
     recorder = Recorder(sample_rate=16000, device_index=None, log_path=DEFAULT_LOG_PATH, rms_threshold=0.01)
     hotkey = WindowsPushToTalkHotkey(
         recorder,
@@ -106,6 +110,7 @@ def main() -> None:
                 continue
             process_capture(capture, backend, stopping)
     finally:
+        backend.close()
         hotkey.stop(end_reason=CaptureEndReason.SERVICE_SHUTDOWN)
         while not captures.empty():
             capture = captures.get_nowait()

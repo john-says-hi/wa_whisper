@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+UNIT=wa-whisper-ptt.service
+PHRASES="$HOME/.local/share/wa_whisper/power_phrases"
+RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+notify() {
+    notify-send -a 'Voice to text' "$1" "${2:-}" || true
+}
+
+play() {
+    timeout 8 paplay "$PHRASES/$1.wav" || true
+}
+
+# Ignore overlapping presses while stopping, starting, or playing a cue.
+exec 9>"$RUNTIME/wa-whisper-power-toggle.lock"
+if ! flock -n 9; then
+    # A switch can be cancelled locally even when the laptop is disconnected.
+    python3 - <<'CONTROL'
+import json, os, socket
+path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "wa_whisper/control.sock")
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(2)
+        connection.connect(path)
+        connection.sendall(b'{"version":1,"command":"cancel_switch"}\n')
+        connection.recv(4096)
+except OSError:
+    pass
+CONTROL
+    if ! flock -w 10 9; then
+        notify 'Dictation power is busy' 'Another GPU operation owns the power lock.'
+        exit 0
+    fi
+fi
+trap 'notify "Dictation toggle failed" "Check systemctl --user status wa-whisper-ptt.service"' ERR
+
+state=$(systemctl --user show "$UNIT" --property=ActiveState --value)
+case "$state" in
+    active|activating|reloading)
+        play powering_down
+        systemctl --user stop "$UNIT"
+        notify 'Desktop dictation off' 'Desktop model released; laptop dictation keeps its own state.'
+        ;;
+    inactive|failed)
+        systemctl --user start "$UNIT"
+        play online
+        notify 'Dictation starting' 'The model is loading. Startup autoload remains enabled.'
+        ;;
+    deactivating)
+        notify 'Dictation is stopping' 'Press Ctrl+Shift+F1 again after shutdown completes.'
+        ;;
+    *)
+        echo "Unexpected service state: $state" >&2
+        exit 1
+        ;;
+esac

@@ -77,7 +77,7 @@ class DictationController:
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 env=environment,
             )
-        self.set_status("Starting — loading the GPU model")
+        self.set_status("Starting — connecting to shared laptop model")
         write_log("Windows dictation power on")
 
     def toggle(self) -> None:
