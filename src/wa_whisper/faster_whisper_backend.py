@@ -9,6 +9,8 @@ from .whisper_backend import WhisperBackend, WhisperResult, WhisperSegment
 
 
 class FasterWhisperBackend(WhisperBackend):
+    ENGINE_NAME = "faster-whisper"
+
     def load(self) -> None:
         with self._lock:
             if self._model is not None:

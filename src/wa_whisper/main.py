@@ -34,7 +34,7 @@ from .recording_admission import RecordingAdmission
 from .recovery_queue import insert_transcript_into_recovery_queue, skipped_recovery_queue_result
 from .text_postprocess import postprocess_text
 from .voice_isolation import VoiceIsolationPipeline
-from .whisper_backend import DEFAULT_MODEL_CACHE, WhisperBackend, WhisperConfig
+from .whisper_backend import DEFAULT_ENGINE, DEFAULT_MODEL_CACHE, WhisperBackend, WhisperConfig
 from .device_routing import RoutedBackend
 
 
@@ -65,6 +65,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--log-path", type=Path, default=DEFAULT_LOG_PATH, help="Log file path.")
     parser.add_argument("--model", default="large-v3", help="Whisper model name.")
+    parser.add_argument("--engine", choices=("faster-whisper", "openai"), default=DEFAULT_ENGINE,
+                        help="Local inference engine; faster-whisper is the standard.")
     parser.add_argument("--beam-size", type=int, default=5, help="Beam search width.")
     parser.add_argument("--best-of", type=int, default=5, help="Number of candidate samples.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature.")
@@ -251,6 +253,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         parser.error(str(exc))
 
     config = WhisperConfig(
+        engine=args.engine,
         model_name=args.model,
         beam_size=args.beam_size,
         best_of=args.best_of,

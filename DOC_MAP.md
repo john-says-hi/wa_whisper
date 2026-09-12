@@ -5,4 +5,4 @@
 - [Cooperative desktop GPU handoff](docs/gpu_handoff.md)
 - [Original product brief](Whisper.md)
 
-- [Faster-whisper laptop inference, immediate desktop GPU release, switching, recording queues and recovery](docs/device_switch.md)
+- [Standard faster-whisper inference on both devices, immediate GPU release, switching, recording queues and recovery](docs/device_switch.md)

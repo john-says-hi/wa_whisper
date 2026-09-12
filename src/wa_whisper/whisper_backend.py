@@ -14,6 +14,7 @@ from .admission import ensure_process_admission, new_capture_reason
 from .log_utils import write_log
 
 DEFAULT_MODEL_NAME = "large-v3"
+DEFAULT_ENGINE = "faster-whisper"
 DEFAULT_MODEL_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
 
 
@@ -36,7 +37,7 @@ class WhisperConfig:
     device: Optional[str] = None
     compute_mode: Optional[str] = None
     fp16: Optional[bool] = None
-    engine: str = "openai"
+    engine: str = DEFAULT_ENGINE
 
 
 @dataclass(slots=True)
@@ -62,6 +63,8 @@ class WhisperResult:
 
 class WhisperBackend:
     """Lazy-loading wrapper that enforces English transcription."""
+
+    ENGINE_NAME = "openai"
 
     def __init__(self, config: WhisperConfig, log_path: Path) -> None:
         self._config = config
@@ -105,7 +108,7 @@ class WhisperBackend:
     def archive_metadata(self) -> Dict[str, Any]:
         """Return stable backend details for dictation recovery metadata."""
         return {
-            "engine": self._config.engine,
+            "engine": self.ENGINE_NAME,
             "model_name": self._config.model_name,
             "device": self._device,
             "compute_mode": self._config.compute_mode,

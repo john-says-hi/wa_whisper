@@ -38,13 +38,13 @@ retries desktop archive records without delayed text injection. `device_config.p
 persists destination and connection settings; `device_notices.py` plays cached
 announcements. See [operations and rollback](docs/device_switch.md).
 
-The laptop broker defaults to faster-whisper with full large-v3 FP16; desktop
-inference retains OpenAI Whisper. `WhisperConfig.engine` selects the implementation
+Desktop inference and the laptop broker default to faster-whisper with full
+large-v3 FP16. `WhisperConfig.engine` selects the implementation
 inside the same disposable worker. Both engines share decoding options and the
 WhisperResult contract. Warm-up consumes faster-whisper's lazy segment iterator
 before readiness is published. Model disposal, leases and ordered queues retain
 their existing ownership boundaries. Broker configuration can select `openai` for
-rollback without replacing the deployed source.
+rollback without replacing the deployed source; desktop supports `--engine openai`.
 
 Device transfers gate inference rather than microphone admission. The existing
 CaptureWorker FIFO holds completed recordings until the switch settles; the

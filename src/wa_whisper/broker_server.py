@@ -60,12 +60,12 @@ def main():
         sys.stderr = (root / "broker_server.log").open("a", encoding="utf-8", buffering=1)
     if sys.stdout is None:
         sys.stdout = sys.stderr
-    from .whisper_backend import WhisperConfig
+    from .whisper_backend import DEFAULT_ENGINE, WhisperConfig
 
     settings = broker_settings()
     token = broker_token(settings)
     root = Path.home() / ".cache/wa_whisper"
-    engine = settings.get("engine", "faster-whisper")
+    engine = settings.get("engine", DEFAULT_ENGINE)
     if engine not in ("openai", "faster-whisper"):
         raise ValueError(f"Unknown broker inference engine: {engine}")
     config = WhisperConfig(device="cuda", compute_mode="gpu", fp16=True, engine=engine)

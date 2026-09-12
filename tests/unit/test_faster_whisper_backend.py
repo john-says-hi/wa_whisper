@@ -72,14 +72,22 @@ def test_warmup_consumes_lazy_inference_and_reuses_model(tmp_path, monkeypatch):
     assert backend.archive_metadata()["engine"] == "faster-whisper"
 
 
-def test_engine_selection_defaults_to_existing_desktop_backend(tmp_path, monkeypatch):
+def test_engine_selection_defaults_to_faster_whisper_with_explicit_rollback(tmp_path, monkeypatch):
     fake_backend(tmp_path, monkeypatch)
     config = WhisperConfig(device="cpu")
-    assert type(create_backend(config, tmp_path / "log")) is WhisperBackend
-    assert isinstance(create_backend(replace(config, engine="faster-whisper"), tmp_path / "log"),
-                      FasterWhisperBackend)
+    assert isinstance(create_backend(config, tmp_path / "log"), FasterWhisperBackend)
+    assert type(create_backend(replace(config, engine="openai"), tmp_path / "log")) is WhisperBackend
     with pytest.raises(ValueError, match="Unknown Whisper engine"):
         create_backend(replace(config, engine="unknown"), tmp_path / "log")
+
+
+def test_desktop_launch_defaults_to_full_large_v3_and_allows_engine_rollback():
+    from wa_whisper.main import build_arg_parser
+
+    parser = build_arg_parser()
+    args = parser.parse_args([])
+    assert (args.engine, args.model, args.beam_size, args.temperature) == ("faster-whisper", "large-v3", 5, 0.0)
+    assert parser.parse_args(["--engine", "openai"]).engine == "openai"
 
 
 def test_ctranslate_memory_errors_keep_existing_broker_error_contract(monkeypatch):

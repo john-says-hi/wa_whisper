@@ -64,10 +64,10 @@ Requests have five-second timeouts, heartbeats run every five seconds, and lease
 expire after twenty seconds. Switch preparation/drain is bounded to five minutes.
 The broker preserves per-request decoding settings and rejects unknown options.
 
-## Laptop inference engine
+## Standard inference engine on both devices
 
-The laptop broker uses faster-whisper/CTranslate2 with the full large-v3 model in
-FP16. Desktop inference continues to use OpenAI Whisper. English, beam size five,
+Desktop inference and the laptop broker use faster-whisper/CTranslate2 with the
+full large-v3 model in FP16. English, beam size five,
 temperature zero, prompts and per-recording decoding options are preserved. VAD
 filtering is disabled and segment timestamps remain enabled. Individual transcripts
 can differ between engines; compare normal dictation before judging quality.
@@ -79,6 +79,12 @@ CTranslate2 dependency; CUDA 12/cuDNN 9 libraries are supplied by the installed
 PyTorch CUDA package. Readiness includes actual GPU warm-up, not just construction
 of the lazy transcription iterator. CUDA out-of-memory failures retain the existing
 spoken memory-full and recording-recovery behavior.
+
+The desktop uses the same converted model under
+`~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3`. Its standard
+launch selects faster-whisper automatically; `--engine openai` explicitly selects
+the prior implementation for comparison or rollback. GPU switching, early desktop
+release, recording queues and hotkeys are unchanged.
 
 To restore the prior laptop engine, stop dictation, set `"engine": "openai"` in
 the laptop's `~/.config/wa_whisper/broker.json`, and restart `WA Whisper Model Broker`.
@@ -92,6 +98,13 @@ Whisper (2.82x faster), with identical transcript text. Load plus warm-up measur
 18.59 versus 60.95 seconds. This is one sample, not a guarantee for other recordings.
 The comparison report is retained at
 `C:\Users\John\Documents\wa_whisper_validation\faster_whisper\comparison.json`.
+
+The same recording on the desktop RTX 4090 measured 1.55 seconds with faster-whisper
+versus 4.16 seconds with OpenAI Whisper (2.69x faster), again with identical text.
+Load plus warm-up measured 3.03 versus 10.02 seconds. Desktop results are retained
+at `~/Documents/wa_whisper_validation/faster_whisper/desktop_comparison.json`.
+Both devices now default to the optimized engine; the user also reported faster
+normal laptop dictation with comparable accuracy before the desktop rollout.
 
 ## Outages and recovery
 
