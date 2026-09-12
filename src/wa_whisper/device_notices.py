@@ -10,6 +10,8 @@ from pathlib import Path
 from .log_utils import write_log
 
 PHRASES = {
+    "transferring_voice": "Transferring voice",
+    "voice_ready": "Voice ready",
     "desktop_online": "Desktop voice online",
     "laptop_online": "Laptop voice online",
     "laptop_offline": "Laptop offline. Recordings will be saved",
@@ -32,7 +34,7 @@ class DeviceNotices:
 
     def say(self, name, detail=""):
         now = time.monotonic()
-        if now - self._last.get(name, -100) < 15:
+        if name not in ("transferring_voice", "voice_ready") and now - self._last.get(name, -100) < 15:
             return
         self._last[name] = now
         self._queue.put((name, detail))

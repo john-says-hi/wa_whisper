@@ -59,6 +59,7 @@ def test_failed_laptop_load_keeps_desktop_model_and_preference(device, monkeypat
     switch(value)
     assert value.destination == "desktop" and not value.local.closed and not stored
     assert remote.closed and notices[-1][0] == "laptop_memory_full"
+    assert [notice[0] for notice in notices] == ["transferring_voice", "laptop_memory_full"]
 
 
 def test_destination_ready_before_desktop_unloads(device, monkeypatch):
@@ -66,11 +67,12 @@ def test_destination_ready_before_desktop_unloads(device, monkeypatch):
     remote = Backend()
     def load(cancelled):
         assert not value.local.closed
+        assert notices == [("transferring_voice",)]
     remote.load = load
     monkeypatch.setattr(routing, "BrokerClient", lambda: remote)
     switch(value)
     assert value.destination == "laptop" and value.local.closed
-    assert stored == ["laptop"] and notices[-1][0] == "laptop_online"
+    assert stored == ["laptop"] and notices[-1][0] == "voice_ready"
 
 
 def test_offline_laptop_does_not_block_switching_back(device):
@@ -121,3 +123,16 @@ def test_exact_left_chord_fires_once_and_never_after_stop(tmp_path):
     hotkey._handle_press(keyboard.Key.shift_l)
     hotkey._handle_press(keyboard.Key.f1)
     assert calls == [True]
+
+
+def test_each_switch_gets_both_announcements_even_within_cooldown(tmp_path, monkeypatch):
+    from wa_whisper import device_notices
+    monkeypatch.setattr(device_notices.threading.Thread, "start", lambda self: None)
+    notices = device_notices.DeviceNotices(tmp_path / "log")
+    for _ in range(2):
+        notices.say("transferring_voice")
+        notices.say("voice_ready")
+    assert [notices._queue.get_nowait()[0] for _ in range(4)] == [
+        "transferring_voice", "voice_ready", "transferring_voice", "voice_ready",
+    ]
+    notices.close()

@@ -1,8 +1,9 @@
 # Desktop and laptop GPU switching
 
 While desktop dictation is on, press **Left Ctrl + Left Shift + Left Alt + F1**
-to switch the inference destination. Wait for “Laptop voice online” or “Desktop
-voice online.” Ctrl+Shift+F1 still turns dictation off/on. Ordinary recording
+to switch the inference destination. “Transferring voice” confirms initiation;
+“Voice ready” confirms the destination model has loaded and dictation is available.
+Both use the same Kokoro af_bella voice as the power announcements. Ctrl+Shift+F1 still turns dictation off/on. Ordinary recording
 shortcuts and the desktop microphone stay the same. The last successful destination
 is saved in `~/.config/wa_whisper/destination.json` across power toggles and restarts.
 

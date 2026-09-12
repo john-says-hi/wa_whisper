@@ -99,6 +99,7 @@ class RoutedBackend:
         self._cancel_switch.clear()
         self._switching = True
         self._switch_thread = threading.Thread(target=self._switch, daemon=True, name="whisper-device-switch")
+        self.notices.say("transferring_voice")
         self._switch_thread.start()
         return {"accepted": True, **self.status()}
 
@@ -143,7 +144,6 @@ class RoutedBackend:
                 committed = True
                 if previous:
                     previous.close()
-            self.notices.say(target + "_online")
         except (OSError, ValueError, RuntimeError) as exc:
             if not committed and candidate is not None:
                 candidate.close()
@@ -159,6 +159,8 @@ class RoutedBackend:
             if lock:
                 lock.close()
             self._switching = False
+            if committed and not self._closed.is_set():
+                self.notices.say("voice_ready")
             self._switch_lock.release()
 
     def capture_admission_reason_for_desktop(self):
