@@ -1,0 +1,11 @@
+# Shared engine versions match the desktop. Install torch from the cu128 index first.
+openai-whisper==20250625
+torch==2.9.0
+sounddevice==0.5.2
+soundfile==0.13.1
+numpy==2.2.6
+pynput==1.8.1
+PyYAML==6.0.3
+word2number==1.1
+faster-whisper==1.2.0
+pycaw==20251023
