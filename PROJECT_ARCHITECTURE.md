@@ -39,7 +39,9 @@ announcements. See [operations and rollback](docs/device_switch.md).
 
 Device transfers gate inference rather than microphone admission. The existing
 CaptureWorker FIFO holds completed recordings until the switch settles; the
-inference lock protects active transcription and model replacement. Cancellation
+inference lock protects transcription and model replacement. Desktop-to-laptop
+transfer cancels active local inference before acquiring that lock; the same WAV
+retries without surrendering its FIFO position. Cancellation
 wakes waiting processing so shutdown can archive remaining recordings. External
 GPU handoff still uses capture quiescence and a queue drain.
 
@@ -48,3 +50,10 @@ GPU admission before either microphone hotkey starts capture. CaptureQueue count
 only audio jobs; control barriers and shutdown sentinels remain unbounded so queue
 capacity cannot obstruct graceful shutdown. The microphone is the single producer,
 and finalization completes enqueueing before the next recording is admitted.
+
+Desktop GPU release precedes laptop load. The desktop inference cancellation
+callback terminates the owned worker; the switch confirms close before constructing
+or loading the remote client. Laptop preference is saved before release, so failed
+loads and restarts cannot silently reload desktop CUDA. Pending laptop load retries
+hold the current recording until readiness, shutdown or an explicit destination
+switch. The reverse transfer retains target-first warm-up.

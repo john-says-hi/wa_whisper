@@ -51,22 +51,23 @@ def switch(device):
     assert not device._switch_thread.is_alive()
 
 
-def test_failed_laptop_load_keeps_desktop_model_and_preference(device, monkeypatch):
+def test_failed_laptop_load_keeps_desktop_free_and_laptop_selected(device, monkeypatch):
     value, stored, notices = device
     remote = Backend()
     remote.failure = BackendError("memory_full", "full")
     monkeypatch.setattr(routing, "BrokerClient", lambda: remote)
     switch(value)
-    assert value.destination == "desktop" and not value.local.closed and not stored
+    assert value.destination == "laptop" and value.local.closed and stored == ["laptop"]
     assert remote.closed and notices[-1][0] == "laptop_memory_full"
     assert [notice[0] for notice in notices] == ["transferring_voice", "laptop_memory_full"]
 
 
-def test_destination_ready_before_desktop_unloads(device, monkeypatch):
+def test_desktop_unloads_before_destination_loading(device, monkeypatch):
     value, stored, notices = device
     remote = Backend()
     def load(cancelled):
-        assert not value.local.closed
+        assert value.local.closed and value.local.pid is None
+        assert stored == ["laptop"]
         assert notices == [("transferring_voice",)]
     remote.load = load
     monkeypatch.setattr(routing, "BrokerClient", lambda: remote)
@@ -226,6 +227,11 @@ def test_recordings_queue_during_transfer_and_resume_in_order(device, tmp_path, 
         assert not calls and not results
         finish_load.set()
         value._switch_thread.join(1)
+        if source == "desktop" and fail_load:
+            assert value.destination == "laptop" and old.closed
+            assert not calls and not results
+            switch(value)
+            assert value.destination == "desktop"
         worker.drain(time.monotonic() + 2, lambda: False)
         assert results == ["recording1.wav", "recording2.wav"]
         assert calls == [("source" if fail_load else "target", name) for name in results]
@@ -253,3 +259,106 @@ def test_shutdown_releases_transcription_waiting_for_transfer(device, tmp_path):
     waiting.join(1)
     assert not waiting.is_alive()
     assert errors == ["cancelled"]
+
+
+def test_running_desktop_process_exits_before_laptop_load_and_same_wav_retries(device, tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    import threading
+    import time
+    from wa_whisper.model_process import ModelProcess
+    from wa_whisper.processing_queue import CaptureQueue, CaptureWorker
+    value, _, notices = device
+    for key in routing.DECODE_FIELDS:
+        setattr(value.config, key, None)
+    local = ModelProcess(value.config, tmp_path / "model.log")
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    local.process, local.ready = process, True
+    value.local = local
+    entered, loading, finish = threading.Event(), threading.Event(), threading.Event()
+    transcribe = local.transcribe
+    def start_local(path, cancelled):
+        entered.set()
+        return transcribe(path, cancelled)
+    local.transcribe = start_local
+    remote = Backend()
+    def load(cancelled):
+        assert process.poll() is not None
+        assert local.pid is None
+        loading.set()
+        assert finish.wait(3)
+    remote.load = load
+    received, completed = [], []
+    def remote_transcribe(path, cancelled):
+        received.append(path)
+        return {"text": path.name, "segments": []}
+    remote.transcribe = remote_transcribe
+    monkeypatch.setattr(routing, "BrokerClient", lambda: remote)
+    first, second = tmp_path / "first.wav", tmp_path / "second.wav"
+    first.write_bytes(b"first preserved WAV")
+    second.write_bytes(b"second preserved WAV")
+    tasks = CaptureQueue()
+    worker = CaptureWorker(tasks, lambda path: completed.append(value.transcribe(path).text), tmp_path / "queue.log")
+    worker.start()
+    try:
+        tasks.put(first)
+        assert entered.wait(1)
+        tasks.put(second)
+        assert value.request_switch()["accepted"]
+        assert loading.wait(2)
+        assert not completed and not received
+        assert process.poll() is not None
+        assert value.destination == "laptop"
+        finish.set()
+        worker.drain(time.monotonic() + 2, lambda: False)
+        assert received == [first, second]
+        assert completed == ["first.wav", "second.wav"]
+        assert first.read_bytes() == b"first preserved WAV"
+        assert second.read_bytes() == b"second preserved WAV"
+        assert [item[0] for item in notices].count("voice_ready") == 1
+    finally:
+        finish.set()
+        value.begin_shutdown()
+        tasks.put(None)
+        worker.join(2)
+        local.close()
+
+
+def test_failed_laptop_load_recovers_without_reloading_desktop(device, tmp_path, monkeypatch):
+    value, _, notices = device
+    for key in routing.DECODE_FIELDS:
+        setattr(value.config, key, None)
+    remote = Backend()
+    remote.failure = BackendError("memory_full", "full")
+    monkeypatch.setattr(routing, "BrokerClient", lambda: remote)
+    switch(value)
+    assert value.destination == "laptop" and value.local.pid is None
+    value.local.load = lambda *args: pytest.fail("Desktop must not reload automatically")
+    remote.failure = None
+    remote.transcribe = lambda path, cancelled: {"text": "Recovered pending recording", "segments": []}
+    assert value.transcribe(tmp_path / "pending.wav").text == "Recovered pending recording"
+    assert value.destination == "laptop" and value.local.pid is None
+    assert notices[-1][0] == "voice_ready"
+
+
+def test_shutdown_after_laptop_failure_releases_pending_recording(device, tmp_path, monkeypatch):
+    import threading
+    value, _, _ = device
+    remote = Backend()
+    remote.failure = BackendError("offline", "offline")
+    monkeypatch.setattr(routing, "BrokerClient", lambda: remote)
+    switch(value)
+    errors = []
+    def transcribe():
+        try:
+            value.transcribe(tmp_path / "preserved.wav")
+        except BackendError as exc:
+            errors.append(exc.code)
+    thread = threading.Thread(target=transcribe)
+    thread.start()
+    value.begin_shutdown()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert errors == ["cancelled"]
+    assert value.local.pid is None

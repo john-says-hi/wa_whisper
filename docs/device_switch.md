@@ -7,16 +7,30 @@ Both use the same Kokoro af_bella voice as the power announcements. Ctrl+Shift+F
 shortcuts and the desktop microphone stay the same. The last successful destination
 is saved in `~/.config/wa_whisper/destination.json` across power toggles and restarts.
 
-The destination loads large-v3 and performs a warm-up before the source process
-exits. Failed loads keep the working source and saved destination. Repeated
-switch presses are ignored while a switch is running. Microphone hotkeys keep
-working throughout transfer: finish push-to-talk or hands-free recordings normally.
-Completed WAVs wait in the existing FIFO queue until transfer finishes, then
-transcribe on the selected model. A failed transfer resumes queued work on the
-previous destination. Only inference already running finishes before model loading;
-recording itself does not delay the transfer. Shutdown preserves queued audio
-through the normal archive/recovery path. Cached WAV announcements load no speech
-model and wait until microphone capture/finalization ends before speaking.
+Desktop-to-laptop transfers prioritize releasing the desktop GPU. After accepting
+the switch, the app saves laptop as the destination, cancels any active desktop
+inference, and waits for its owned process to exit before contacting/loading the
+laptop model. The interrupted recording remains at the head of the transcription
+queue and retries from the same WAV; later recordings do not overtake it. GPU
+release follows process exit, rather than waiting through laptop model loading.
+
+If laptop connection or loading fails, laptop remains selected and the desktop
+model stays unloaded, including after restarting dictation. Pending audio waits
+and retries when the laptop becomes ready. The seven-waiting-recording limit still
+applies. Use the switch shortcut to explicitly return to the desktop; there is no
+automatic desktop reload. “Voice ready” is spoken only after model readiness.
+A configuration or preference-save failure before release leaves the original
+working destination intact.
+
+Laptop-to-desktop transfers still load and warm up the desktop first, subject to
+GPU admission, then release the laptop lease. Failed desktop loads retain the
+laptop. Repeated switch presses are ignored while a transfer runs.
+
+Microphone hotkeys work throughout either transfer: finish push-to-talk or
+hands-free recordings normally. Completed WAVs wait in the FIFO queue until the
+selected model is ready. Recording does not delay a transfer. Shutdown preserves
+queued audio through the normal archive/recovery path. Cached announcements load
+no speech model and wait until microphone capture/finalization ends before speaking.
 
 ## Recording while transcription is busy
 

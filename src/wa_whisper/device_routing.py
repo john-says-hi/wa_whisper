@@ -29,6 +29,8 @@ class RoutedBackend:
         self.recovery = None
         self._closed = threading.Event()
         self._cancel_switch = threading.Event()
+        self._release_desktop = threading.Event()
+        self._laptop_pending = self.destination == "laptop"
         self._switching = False
         self._switch_finished = threading.Event()
         self._switch_finished.set()
@@ -78,15 +80,44 @@ class RoutedBackend:
                 continue
             try:
                 if not self._switching:
+                    self._prepare_pending_laptop()
                     return self._transcribe_selected(path, recovery=recovery)
+            except (OSError, ValueError, RuntimeError) as exc:
+                if self._release_desktop.is_set() and getattr(exc, "code", None) == "cancelled":
+                    continue
+                if recovery or not (self.destination == "laptop" and self._laptop_pending):
+                    raise
+                self._announce_laptop_failure(exc)
             finally:
                 self._inference_lock.release()
+            self._closed.wait(1)
         raise BackendError("cancelled", "Dictation stopped; recording preserved")
+
+    def _prepare_pending_laptop(self):
+        if self.destination != "laptop" or not self._laptop_pending:
+            return
+        remote = self._remote()
+        was_ready = remote.ready
+        try:
+            remote.load(lambda: self._closed.is_set() or self._switching)
+        except BackendError:
+            remote.close()
+            self.remote = None
+            raise
+        self._laptop_pending = False
+        if not was_ready:
+            self.notices.say("voice_ready")
+
+    def _announce_laptop_failure(self, error):
+        name = "laptop_memory_full" if getattr(error, "code", None) == "memory_full" else "laptop_offline"
+        if not self._closed.is_set() and not self._switching:
+            self.notices.say(name, str(error))
 
     def _transcribe_selected(self, path, *, recovery=False):
         if recovery and (self._switching or self.capture_admission_reason()):
             raise BackendError("busy", "Recovery waits for the selected GPU")
-        cancelled = lambda: (self._closed.is_set() or (recovery and self._switching)
+        cancelled = lambda: (self._closed.is_set() or self._release_desktop.is_set()
+                              or (recovery and self._switching)
                               or (self._switching and self.destination == "laptop"
                                   and (self.remote is None or not self.remote.ready)))
         selected = self._remote() if self.destination == "laptop" else self.local
@@ -127,7 +158,7 @@ class RoutedBackend:
     def _switch(self):
         target = "laptop" if self.destination == "desktop" else "desktop"
         candidate = None
-        committed = False
+        completed = False
         cancelled = lambda: self._closed.is_set() or self._cancel_switch.is_set()
         lock = None
         try:
@@ -137,29 +168,41 @@ class RoutedBackend:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise BackendError("busy", "Another power or desktop GPU operation is active") from exc
+            if cancelled():
+                raise BackendError("cancelled", "Device switch cancelled")
             deadline = time.monotonic() + 300
+            if target == "laptop":
+                if self.config.model_name != "large-v3":
+                    raise BackendError("configuration", "Laptop broker requires the large-v3 model")
+                # Save the explicit destination before relinquishing desktop CUDA.
+                save_destination(target)
+                self._release_desktop.set()
             with self._inference_lock:
                 if target == "desktop" and self.capture_admission_reason_for_desktop():
                     raise BackendError("busy", "Desktop GPU is reserved by another job")
-                if target == "laptop" and self.config.model_name != "large-v3":
-                    raise BackendError("configuration", "Laptop broker requires the large-v3 model")
-                candidate = BrokerClient() if target == "laptop" else self.local
+                if target == "laptop":
+                    self.destination = target
+                    self._laptop_pending = True
+                    self.local.close()
+                    candidate = self._remote()
+                else:
+                    candidate = self.local
                 candidate.load(lambda: cancelled() or time.monotonic() >= deadline)
                 if cancelled():
                     raise BackendError("cancelled", "Device switch cancelled")
-                save_destination(target)
-                previous = self.remote if self.destination == "laptop" else self.local
-                if target == "laptop":
-                    self.remote = candidate
-                else:
-                    self.remote = None
-                self.destination = target
-                committed = True
-                if previous:
-                    previous.close()
+                if target == "desktop":
+                    save_destination(target)
+                    previous, self.remote = self.remote, None
+                    self.destination = target
+                    if previous:
+                        previous.close()
+                self._laptop_pending = False
+                completed = True
         except (OSError, ValueError, RuntimeError) as exc:
-            if not committed and candidate is not None:
+            if not completed and candidate is not None:
                 candidate.close()
+                if target == "laptop":
+                    self.remote = None
             code = getattr(exc, "code", "switch_failed")
             if not cancelled():
                 name = (target + "_memory_full" if code == "memory_full" else
@@ -169,8 +212,9 @@ class RoutedBackend:
         finally:
             if lock:
                 lock.close()
+            self._release_desktop.clear()
             self._switching = False
-            if committed and not self._closed.is_set():
+            if completed and not self._closed.is_set():
                 self.notices.say("voice_ready")
             self._switch_finished.set()
             self._switch_lock.release()
