@@ -6,6 +6,7 @@ PHRASES="$HOME/.local/share/wa_whisper/power_phrases"
 RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 notify() {
+    command -v notify-send >/dev/null 2>&1 || return 0
     notify-send -a 'Voice to text' "$1" "${2:-}" || true
 }
 

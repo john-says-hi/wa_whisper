@@ -136,3 +136,23 @@ def test_each_switch_gets_both_announcements_even_within_cooldown(tmp_path, monk
         "transferring_voice", "voice_ready", "transferring_voice", "voice_ready",
     ]
     notices.close()
+
+
+def test_missing_notifications_cannot_suppress_spoken_feedback(tmp_path, monkeypatch):
+    from wa_whisper import device_notices
+    monkeypatch.setattr(device_notices.threading.Thread, "start", lambda self: None)
+    monkeypatch.setattr(device_notices.Path, "home", lambda: tmp_path)
+    sound = tmp_path / ".local/share/wa_whisper/power_phrases/voice_ready.wav"
+    sound.parent.mkdir(parents=True)
+    sound.write_bytes(b"cached audio")
+    notices = device_notices.DeviceNotices(tmp_path / "log")
+    played = []
+    def run(command, **kwargs):
+        if command[0] == "notify-send":
+            raise FileNotFoundError("notify-send unavailable")
+        played.append(command)
+        notices.close()
+    monkeypatch.setattr(device_notices.subprocess, "run", run)
+    notices.say("voice_ready")
+    notices._run()
+    assert played == [["paplay", str(sound)]]

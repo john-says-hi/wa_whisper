@@ -56,6 +56,9 @@ class DeviceNotices:
             write_log(f"{phrase}: {detail}", self.log_path)
             try:
                 subprocess.run(["notify-send", "-a", "Voice to text", phrase, detail], timeout=3, check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                write_log(f"Device notification unavailable: {exc}", self.log_path)
+            try:
                 sound = Path.home() / ".local/share/wa_whisper/power_phrases" / (name + ".wav")
                 if sound.exists():
                     subprocess.run(["paplay", str(sound)], timeout=8, check=False)
