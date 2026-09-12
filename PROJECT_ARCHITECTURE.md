@@ -36,3 +36,9 @@ owns SSH, heartbeats and the lightweight Windows client. `device_recovery.py`
 retries desktop archive records without delayed text injection. `device_config.py`
 persists destination and connection settings; `device_notices.py` plays cached
 announcements. See [operations and rollback](docs/device_switch.md).
+
+Device transfers gate inference rather than microphone admission. The existing
+CaptureWorker FIFO holds completed recordings until the switch settles; the
+inference lock protects active transcription and model replacement. Cancellation
+wakes waiting processing so shutdown can archive remaining recordings. External
+GPU handoff still uses capture quiescence and a queue drain.

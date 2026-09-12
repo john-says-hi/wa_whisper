@@ -156,3 +156,100 @@ def test_missing_notifications_cannot_suppress_spoken_feedback(tmp_path, monkeyp
     notices.say("voice_ready")
     notices._run()
     assert played == [["paplay", str(sound)]]
+
+
+@pytest.mark.parametrize("source", ["desktop", "laptop"])
+@pytest.mark.parametrize("fail_load", [False, True])
+def test_recordings_queue_during_transfer_and_resume_in_order(device, tmp_path, monkeypatch, source, fail_load):
+    import threading
+    import time
+    from wa_whisper.processing_queue import CaptureQueue, CaptureWorker
+    value, _, _ = device
+    value.destination = source
+    old = Backend()
+    target = Backend()
+    if source == "desktop":
+        value.local = old
+        monkeypatch.setattr(routing, "BrokerClient", lambda: target)
+    else:
+        value.remote, value.local = old, target
+    for key in routing.DECODE_FIELDS:
+        setattr(value.config, key, None)
+    loading, finish_load = threading.Event(), threading.Event()
+    calls, results = [], []
+    def load(cancelled):
+        loading.set()
+        assert finish_load.wait(3)
+        if fail_load:
+            raise BackendError("memory_full", "full")
+    target.load = load
+    for name, backend in (("source", old), ("target", target)):
+        def transcribe(path, cancelled, name=name):
+            calls.append((name, path.name))
+            return {"text": path.name, "segments": []}
+        backend.transcribe = transcribe
+    tasks = CaptureQueue()
+    worker = CaptureWorker(tasks, lambda result: results.append(value.transcribe(result.path).text), tmp_path / "queue.log")
+    worker.start()
+    class Recorder:
+        count = 0
+        def start(self):
+            self.count += 1
+            self.path = tmp_path / f"recording{self.count}.wav"
+            self.path.write_bytes(b"recorded audio")
+            return self.path
+        def stop(self, timeout):
+            return self.path
+        def last_capture_stats(self):
+            return None
+    accepted = []
+    def accept(result):
+        accepted.append(result)
+        tasks.put(result)
+    hotkey = PushToTalkHotkey(Recorder(), on_capture_finished=accept,
+                             silence_timeout=0.5, log_path=tmp_path / "hotkey.log",
+                             enable_audio_mute=False, enable_hotkey_shield=False,
+                             hotkey_repress_grace_seconds=0, capture_admission=value.capture_admission_reason)
+    value.capture, value.worker = hotkey, worker
+    try:
+        assert value.request_switch()["accepted"]
+        assert loading.wait(1)
+        for index in range(2):
+            hotkey._handle_press(keyboard.Key.alt_r)
+            assert hotkey.capture_state()["recording"]
+            hotkey._handle_release(keyboard.Key.alt_r)
+            deadline = time.monotonic() + 1
+            while hotkey.capture_state()["finalizing"]:
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+            assert len(accepted) == index + 1
+        assert not calls and not results
+        finish_load.set()
+        value._switch_thread.join(1)
+        worker.drain(time.monotonic() + 2, lambda: False)
+        assert results == ["recording1.wav", "recording2.wav"]
+        assert calls == [("source" if fail_load else "target", name) for name in results]
+    finally:
+        finish_load.set()
+        hotkey.stop()
+        tasks.put(None)
+        worker.join(2)
+
+
+def test_shutdown_releases_transcription_waiting_for_transfer(device, tmp_path):
+    import threading
+    value, _, _ = device
+    value._switching = True
+    value._switch_finished.clear()
+    errors = []
+    def transcribe():
+        try:
+            value.transcribe(tmp_path / "saved.wav")
+        except BackendError as exc:
+            errors.append(exc.code)
+    waiting = threading.Thread(target=transcribe)
+    waiting.start()
+    value.begin_shutdown()
+    waiting.join(1)
+    assert not waiting.is_alive()
+    assert errors == ["cancelled"]

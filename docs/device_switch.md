@@ -9,8 +9,14 @@ is saved in `~/.config/wa_whisper/destination.json` across power toggles and res
 
 The destination loads large-v3 and performs a warm-up before the source process
 exits. Failed loads keep the working source and saved destination. Repeated
-switch presses are ignored while a switch is running. Active captures and accepted
-work drain before switching. Cached WAV announcements load no speech model.
+switch presses are ignored while a switch is running. Microphone hotkeys keep
+working throughout transfer: finish push-to-talk or hands-free recordings normally.
+Completed WAVs wait in the existing FIFO queue until transfer finishes, then
+transcribe on the selected model. A failed transfer resumes queued work on the
+previous destination. Only inference already running finishes before model loading;
+recording itself does not delay the transfer. Shutdown preserves queued audio
+through the normal archive/recovery path. Cached WAV announcements load no speech
+model and wait until microphone capture/finalization ends before speaking.
 
 ## Connection and shared ownership
 

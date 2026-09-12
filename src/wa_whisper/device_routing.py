@@ -5,7 +5,6 @@ import fcntl
 import os
 import threading
 import time
-import uuid
 from pathlib import Path
 
 from .admission import new_capture_reason
@@ -31,6 +30,8 @@ class RoutedBackend:
         self._closed = threading.Event()
         self._cancel_switch = threading.Event()
         self._switching = False
+        self._switch_finished = threading.Event()
+        self._switch_finished.set()
         self._switch_lock = threading.Lock()
         self._inference_lock = threading.Lock()
         self._switch_thread = None
@@ -46,7 +47,7 @@ class RoutedBackend:
         pass
 
     def capture_admission_reason(self):
-        if self.destination == "laptop":
+        if self._switching or self.destination == "laptop":
             return None
         return new_capture_reason() if self.config.device != "cpu" else None
 
@@ -67,27 +68,42 @@ class RoutedBackend:
         return self.remote
 
     def transcribe(self, path, *, recovery=False):
-        with self._inference_lock:
-            if recovery and (self._switching or self.capture_admission_reason()):
-                raise BackendError("busy", "Recovery waits for the selected GPU")
-            cancelled = lambda: (self._closed.is_set() or (recovery and self._switching)
-                                  or (self._switching and self.destination == "laptop"
-                                      and (self.remote is None or not self.remote.ready)))
-            selected = self._remote() if self.destination == "laptop" else self.local
+        while not self._closed.is_set():
+            if self._switching:
+                if recovery:
+                    raise BackendError("busy", "Recovery waits for the selected GPU")
+                self._switch_finished.wait(0.1)
+                continue
+            if not self._inference_lock.acquire(timeout=0.1):
+                continue
             try:
-                if self.destination == "laptop":
-                    if self.config.model_name != "large-v3":
-                        raise BackendError("configuration", "Laptop broker requires the large-v3 model")
-                    selected.decode_options = {key: getattr(self.config, key) for key in DECODE_FIELDS}
-                result = selected.transcribe(path, cancelled)
-                return WhisperResult(text=result["text"], info=result.get("info", {}),
-                                     segments=[WhisperSegment(**segment) for segment in result.get("segments", [])])
-            except BackendError as exc:
-                if exc.code == "memory_full":
-                    self.notices.say(self.destination + "_memory_full")
-                elif self.destination == "laptop" and exc.code != "cancelled":
-                    self.notices.say("laptop_offline", str(exc))
-                raise
+                if not self._switching:
+                    return self._transcribe_selected(path, recovery=recovery)
+            finally:
+                self._inference_lock.release()
+        raise BackendError("cancelled", "Dictation stopped; recording preserved")
+
+    def _transcribe_selected(self, path, *, recovery=False):
+        if recovery and (self._switching or self.capture_admission_reason()):
+            raise BackendError("busy", "Recovery waits for the selected GPU")
+        cancelled = lambda: (self._closed.is_set() or (recovery and self._switching)
+                              or (self._switching and self.destination == "laptop"
+                                  and (self.remote is None or not self.remote.ready)))
+        selected = self._remote() if self.destination == "laptop" else self.local
+        try:
+            if self.destination == "laptop":
+                if self.config.model_name != "large-v3":
+                    raise BackendError("configuration", "Laptop broker requires the large-v3 model")
+                selected.decode_options = {key: getattr(self.config, key) for key in DECODE_FIELDS}
+            result = selected.transcribe(path, cancelled)
+            return WhisperResult(text=result["text"], info=result.get("info", {}),
+                                 segments=[WhisperSegment(**segment) for segment in result.get("segments", [])])
+        except BackendError as exc:
+            if exc.code == "memory_full":
+                self.notices.say(self.destination + "_memory_full")
+            elif self.destination == "laptop" and exc.code != "cancelled":
+                self.notices.say("laptop_offline", str(exc))
+            raise
 
     def acknowledge(self, path):
         if self.destination == "laptop" and self.remote:
@@ -97,6 +113,7 @@ class RoutedBackend:
         if self._closed.is_set() or not self._switch_lock.acquire(blocking=False):
             return {"accepted": False, **self.status()}
         self._cancel_switch.clear()
+        self._switch_finished.clear()
         self._switching = True
         self._switch_thread = threading.Thread(target=self._switch, daemon=True, name="whisper-device-switch")
         self.notices.say("transferring_voice")
@@ -109,7 +126,6 @@ class RoutedBackend:
 
     def _switch(self):
         target = "laptop" if self.destination == "desktop" else "desktop"
-        token = uuid.uuid4().hex
         candidate = None
         committed = False
         cancelled = lambda: self._closed.is_set() or self._cancel_switch.is_set()
@@ -121,10 +137,7 @@ class RoutedBackend:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise BackendError("busy", "Another power or desktop GPU operation is active") from exc
-            self.capture.begin_quiesce(token)
             deadline = time.monotonic() + 300
-            self.capture.wait_capture_idle(token, deadline, cancelled)
-            self.worker.drain(deadline, cancelled)
             with self._inference_lock:
                 if target == "desktop" and self.capture_admission_reason_for_desktop():
                     raise BackendError("busy", "Desktop GPU is reserved by another job")
@@ -154,13 +167,12 @@ class RoutedBackend:
                         "laptop_offline" if target == "laptop" and code == "offline" else "switch_failed")
                 self.notices.say(name, str(exc))
         finally:
-            if self.capture:
-                self.capture.cancel_quiesce(token)
             if lock:
                 lock.close()
             self._switching = False
             if committed and not self._closed.is_set():
                 self.notices.say("voice_ready")
+            self._switch_finished.set()
             self._switch_lock.release()
 
     def capture_admission_reason_for_desktop(self):

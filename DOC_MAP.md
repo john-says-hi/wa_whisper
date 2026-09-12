@@ -5,4 +5,4 @@
 - [Cooperative desktop GPU handoff](docs/gpu_handoff.md)
 - [Original product brief](Whisper.md)
 
-- [Desktop/laptop GPU switching, spoken progress and recovery](docs/device_switch.md)
+- [Desktop/laptop GPU switching, recording during transfer, spoken progress and recovery](docs/device_switch.md)
