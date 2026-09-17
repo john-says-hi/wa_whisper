@@ -11,6 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 main_mod = importlib.import_module("wa_whisper.main")
 
 
+@pytest.fixture(autouse=True)
+def resolve_is_closed(monkeypatch):
+    monkeypatch.setattr(main_mod.resolve_protection, "insertion_block_reason", lambda: None)
+
+
 class FakeOrcaStream:
     def __init__(self, responses):
         self.frames = []
