@@ -20,6 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
 
+from . import resolve_protection
 from .audio_cues import play_system_bell
 from .admission import enabled as shared_admission_enabled
 from .compute_mode import ComputeModeError, compute_mode_values, resolve_compute_device
@@ -113,6 +114,7 @@ class CaptureTask:
     audio_path: Path
     stats: Optional[RecorderStats]
     created_at: datetime
+    insertion_block_reason: Optional[str] = None
 
 
 TaskItem = Optional[CaptureTask | DrainBarrier]
@@ -309,6 +311,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             orca_daemon_dir=args.orca_daemon_dir,
             orca_session_id=args.orca_session_id,
             archive=archive,
+            insertion_block_reason=item.insertion_block_reason,
         )
 
     worker = CaptureWorker(task_queue, process_task, log_path)
@@ -414,6 +417,7 @@ def handle_capture_result(
                 audio_path=result.path,
                 stats=result.stats,
                 created_at=result.created_at,
+                insertion_block_reason=resolve_protection.insertion_block_reason(),
             )
         )
         return
@@ -497,7 +501,9 @@ def process_capture(
     orca_daemon_dir: Optional[Path],
     orca_session_id: Optional[str],
     archive: Optional[DictationArchive] = None,
+    insertion_block_reason: Optional[str] = None,
 ) -> None:
+    insertion_block_reason = insertion_block_reason or resolve_protection.insertion_block_reason()
     write_log(f"Processing capture {audio_path}", log_path)
     if stats:
         ratio = f"{stats.speech_ratio:.2f}" if stats.speech_ratio is not None else "n/a"
@@ -571,15 +577,32 @@ def process_capture(
         if recovery and backend._closed.is_set():
             archive.update_record(archive_record, status="saved_without_injection")
             return
-        injected = inject_text(
-            text,
-            xdotool_bin,
-            log_path,
-            enable_beep=enable_beep,
-            injection_mode=injection_mode,
-            orca_daemon_dir=orca_daemon_dir,
-            orca_session_id=orca_session_id,
-        )
+        try:
+            if insertion_block_reason:
+                raise resolve_protection.InsertionBlocked(insertion_block_reason)
+            injected = inject_text(
+                text,
+                xdotool_bin,
+                log_path,
+                enable_beep=enable_beep,
+                injection_mode=injection_mode,
+                orca_daemon_dir=orca_daemon_dir,
+                orca_session_id=orca_session_id,
+            )
+        except resolve_protection.InsertionBlocked as exc:
+            update_dictation_archive_record(
+                archive, archive_record, log_path,
+                status="saved_without_injection",
+                clipboard=recovery_queue_result.clipboard_metadata(),
+                recovery_queue=recovery_queue_result.recovery_queue_metadata(),
+                injection={"mode": injection_mode.value, "succeeded": False, "blocked_reason": exc.reason},
+            )
+            destination = (
+                "CopyQ history" if recovery_queue_result.inserted
+                else str(archive_record.transcript_path) if archive_record else "the dictation archive"
+            )
+            resolve_protection.notify_saved_transcript(exc.reason, destination, log_path)
+            return
         update_dictation_archive_record(
             archive,
             archive_record,
@@ -690,6 +713,7 @@ def inject_text(
     orca_daemon_dir: Optional[Path] = None,
     orca_session_id: Optional[str] = None,
 ) -> bool:
+    resolve_protection.ensure_insertion_allowed()
     if injection_mode == InjectionMode.ORCA_DAEMON:
         delivered = inject_text_orca_daemon(
             text,

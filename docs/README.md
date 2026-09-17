@@ -36,6 +36,23 @@ The prototype currently includes:
 Use `scripts/bootstrap.sh` to provision dependencies, then run `wa-whisper` inside an active terminal
 session. Hold Right Alt to dictate and release it to transcribe and inject text into the active window.
 
+### Resolve protection on the Linux desktop
+
+While DaVinci Resolve is running, including in the background, automatic text
+insertion pauses in every app. Dictation still saves the audio and transcript and
+adds the text to CopyQ history without replacing your active clipboard. A desktop
+notification tells you where to retrieve it; select the saved text and paste it
+manually into the intended text field. If CopyQ is unavailable, the notification
+points to the archived transcript instead.
+
+The guard identifies `/opt/resolve/bin/resolve` through `/proc`, independent of
+window titles or focus. Detection errors also pause insertion. Checks occur when
+a recording is queued, before transcription, and immediately before delivery.
+A blocked recording stays saved even if Resolve closes while it waits; it is
+never automatically replayed. New recordings resume ordinary insertion once
+Resolve is closed and detection succeeds. This applies to desktop dictation using
+either the local GPU or laptop inference. The Windows microphone client is separate.
+
 For hands-free recording, hold Left Ctrl first and press Right Alt once. A short bell confirms that
 recording is latched on; releasing both keys does not stop it. Press Left Ctrl followed by Right Alt
 again to stop, hear the bell, and begin normal transcription and injection. Right Alt by itself is
