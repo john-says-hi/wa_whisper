@@ -1,6 +1,6 @@
 # Documentation index
 
-- [Application setup, usage and Linux Resolve insertion protection](docs/README.md)
+- [Application setup, usage and focused Resolve insertion protection](docs/README.md)
 - [Architecture](PROJECT_ARCHITECTURE.md)
 - [Cooperative desktop GPU handoff](docs/gpu_handoff.md)
 - [Original product brief](Whisper.md)

@@ -114,7 +114,6 @@ class CaptureTask:
     audio_path: Path
     stats: Optional[RecorderStats]
     created_at: datetime
-    insertion_block_reason: Optional[str] = None
 
 
 TaskItem = Optional[CaptureTask | DrainBarrier]
@@ -311,7 +310,6 @@ def main(argv: Optional[list[str]] = None) -> None:
             orca_daemon_dir=args.orca_daemon_dir,
             orca_session_id=args.orca_session_id,
             archive=archive,
-            insertion_block_reason=item.insertion_block_reason,
         )
 
     worker = CaptureWorker(task_queue, process_task, log_path)
@@ -417,7 +415,6 @@ def handle_capture_result(
                 audio_path=result.path,
                 stats=result.stats,
                 created_at=result.created_at,
-                insertion_block_reason=resolve_protection.insertion_block_reason(),
             )
         )
         return
@@ -501,9 +498,7 @@ def process_capture(
     orca_daemon_dir: Optional[Path],
     orca_session_id: Optional[str],
     archive: Optional[DictationArchive] = None,
-    insertion_block_reason: Optional[str] = None,
 ) -> None:
-    insertion_block_reason = insertion_block_reason or resolve_protection.insertion_block_reason()
     write_log(f"Processing capture {audio_path}", log_path)
     if stats:
         ratio = f"{stats.speech_ratio:.2f}" if stats.speech_ratio is not None else "n/a"
@@ -578,8 +573,6 @@ def process_capture(
             archive.update_record(archive_record, status="saved_without_injection")
             return
         try:
-            if insertion_block_reason:
-                raise resolve_protection.InsertionBlocked(insertion_block_reason)
             injected = inject_text(
                 text,
                 xdotool_bin,

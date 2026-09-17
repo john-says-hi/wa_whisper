@@ -12,7 +12,7 @@ loads dictation dependencies lazily so control clients need no Torch import.
 | `whisper_backend.py` | Lazy model loading and transcription |
 | `faster_whisper_backend.py` | Full-model CTranslate2 loading, decoding adaptation and segment conversion |
 | `dictation_archive.py`, `recovery_queue.py` | Durable audio/text recovery and CopyQ recovery |
-| `resolve_protection.py` | Linux Resolve executable detection, insertion blocking and saved-text notices |
+| `focused_window.py`, `resolve_protection.py` | COSMIC keyboard-focus detection, Resolve-only insertion blocking and saved-text notices |
 | `control_state.py` | Lease ownership, capture/processing drain, shutdown commitment |
 | `control_server.py`, `control_protocol.py`, `control_cli.py` | Private local control transport and CLI |
 | `compute_mode.py`, `mode_cli.py` | Persisted compute selection and service restart |

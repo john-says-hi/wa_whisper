@@ -36,22 +36,33 @@ The prototype currently includes:
 Use `scripts/bootstrap.sh` to provision dependencies, then run `wa-whisper` inside an active terminal
 session. Hold Right Alt to dictate and release it to transcribe and inject text into the active window.
 
-### Resolve protection on the Linux desktop
+### Resolve protection on the COSMIC desktop
 
-While DaVinci Resolve is running, including in the background, automatic text
-insertion pauses in every app. Dictation still saves the audio and transcript and
-adds the text to CopyQ history without replacing your active clipboard. A desktop
-notification tells you where to retrieve it; select the saved text and paste it
-manually into the intended text field. If CopyQ is unavailable, the notification
-points to the archived transcript instead.
+Automatic typing is blocked only when a Resolve window has keyboard focus at
+delivery time, including its Project Settings dialog. Warp and other apps continue
+receiving dictation while Resolve is open in the background. Click the intended
+text field before transcription finishes; mouse position alone is not keyboard focus.
 
-The guard identifies `/opt/resolve/bin/resolve` through `/proc`, independent of
-window titles or focus. Detection errors also pause insertion. Checks occur when
-a recording is queued, before transcription, and immediately before delivery.
-A blocked recording stays saved even if Resolve closes while it waits; it is
-never automatically replayed. New recordings resume ordinary insertion once
-Resolve is closed and detection succeeds. This applies to desktop dictation using
-either the local GPU or laptop inference. The Windows microphone client is separate.
+If Resolve is focused, or focus cannot be determined, dictation still saves the
+audio and transcript and adds the text to CopyQ history without replacing your
+active clipboard. A desktop notification points to CopyQ history, or the archived
+transcript if CopyQ is unavailable. Select the text and paste it manually. Blocked
+text is never automatically replayed after focus changes.
+
+The guard reads a fresh COSMIC/Wayland window snapshot immediately before delivery
+and matches the focused application ID, never the window title. Earlier focus
+during recording or queueing does not block a later delivery into Warp. This covers
+desktop dictation using either GPU destination; the Windows microphone client is separate.
+Keep keyboard focus in the intended text field until typing finishes: the guard
+cannot retract a stream of keystrokes that was already dispatched before focus changed.
+
+The local `wa_toplevels` helper must be installed at
+`~/.local/share/wa_whisper/bin/wa_toplevels`. This installation uses the existing
+Wise Apple COSMIC helper, copied from
+`~/Documents/wise_apple/infra/scripts/ui_automation/wa_toplevels/target/release/wa_toplevels`.
+An absent, failed, or ambiguous helper response saves text without typing.
+
+### Hands-free recording
 
 For hands-free recording, hold Left Ctrl first and press Right Alt once. A short bell confirms that
 recording is latched on; releasing both keys does not stop it. Press Left Ctrl followed by Right Alt

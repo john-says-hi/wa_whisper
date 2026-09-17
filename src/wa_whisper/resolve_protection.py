@@ -1,17 +1,16 @@
-"""Prevent desktop dictation from sending shortcuts while Resolve is running."""
+"""Prevent desktop dictation from sending shortcuts into focused Resolve windows."""
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from pathlib import Path
 
+from .focused_window import FocusUnavailable, read_focused_window
 from .log_utils import write_log
 
-RESOLVE_EXECUTABLE = "/opt/resolve/bin/resolve"
-RESOLVE_RUNNING = "resolve_running"
-DETECTION_UNAVAILABLE = "resolve_detection_unavailable"
+RESOLVE_FOCUSED = "resolve_focused"
+DETECTION_UNAVAILABLE = "focus_detection_unavailable"
 
 
 class InsertionBlocked(RuntimeError):
@@ -20,40 +19,13 @@ class InsertionBlocked(RuntimeError):
         self.reason = reason
 
 
-def insertion_block_reason(proc_root: Path = Path("/proc")) -> str | None:
-    """Inspect executable identities; Resolve names its main thread 'GUI Thread'."""
-    uncertain = False
+def insertion_block_reason() -> str | None:
+    """Only the current keyboard destination decides whether delivery is allowed."""
     try:
-        user_id = os.getuid()
-        for process in proc_root.iterdir():
-            if not process.name.isdecimal():
-                continue
-            try:
-                if process.stat().st_uid != user_id:
-                    continue
-                is_resolve = process_is_resolve(process)
-            except FileNotFoundError:
-                continue
-            except OSError:
-                uncertain = True
-                continue
-            if is_resolve:
-                return RESOLVE_RUNNING
-    except OSError:
+        focused = read_focused_window()
+    except FocusUnavailable:
         return DETECTION_UNAVAILABLE
-    return DETECTION_UNAVAILABLE if uncertain else None
-
-
-def process_is_resolve(process: Path) -> bool:
-    try:
-        executable = str((process / "exe").readlink()).removesuffix(" (deleted)")
-        return executable == RESOLVE_EXECUTABLE
-    except PermissionError:
-        # Some same-user daemons deny ptrace access but expose their launch command.
-        command = (process / "cmdline").read_bytes().split(b"\0", 1)[0]
-        if not command:
-            raise PermissionError(f"Cannot identify process {process.name}")
-        return Path(os.fsdecode(command)).name == "resolve"
+    return RESOLVE_FOCUSED if focused.app_id.casefold() == "resolve" else None
 
 
 def ensure_insertion_allowed() -> None:
@@ -64,9 +36,9 @@ def ensure_insertion_allowed() -> None:
 
 def notify_saved_transcript(reason: str, destination: str, log_path: Path) -> None:
     explanation = (
-        "DaVinci Resolve is open."
-        if reason == RESOLVE_RUNNING
-        else "DaVinci Resolve detection is unavailable."
+        "DaVinci Resolve has keyboard focus."
+        if reason == RESOLVE_FOCUSED
+        else "The keyboard-focused application could not be identified."
     )
     body = f"{explanation} Automatic typing is paused. Retrieve your text from {destination}."
     write_log(f"Dictation saved without insertion: {reason}; retrieve from {destination}", log_path)
