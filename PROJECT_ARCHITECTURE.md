@@ -7,12 +7,13 @@ loads dictation dependencies lazily so control clients need no Torch import.
 | Module | Responsibility |
 | --- | --- |
 | `hotkeys.py` | Push-to-talk and hands-free lifecycle, capture admission gate |
+| `recording_mode.py` | Per-recording hotkey intent shared by capture, queued transcription and delivery |
 | `recorder.py` | Microphone capture and finalized WAV files |
 | `processing_queue.py` | Sequential capture processing and completion barriers |
 | `whisper_backend.py` | Lazy model loading and transcription |
 | `faster_whisper_backend.py` | Full-model CTranslate2 loading, decoding adaptation and segment conversion |
 | `dictation_archive.py`, `recovery_queue.py` | Durable audio/text recovery and CopyQ recovery |
-| `focused_window.py`, `resolve_protection.py` | COSMIC keyboard-focus detection, Resolve-only insertion blocking and saved-text notices |
+| `focused_window.py`, `resolve_protection.py` | COSMIC keyboard-focus detection, push-to-talk blocking in Resolve, hands-free permission and saved-text notices |
 | `control_state.py` | Lease ownership, capture/processing drain, shutdown commitment |
 | `control_server.py`, `control_protocol.py`, `control_cli.py` | Private local control transport and CLI |
 | `compute_mode.py`, `mode_cli.py` | Persisted compute selection and service restart |
@@ -21,6 +22,12 @@ loads dictation dependencies lazily so control clients need no Torch import.
 the prepared desktop source-selection drop-in. Existing `scripts` launchers and
 the installed service remain intact. Tests use CPU fakes under `tests`; new
 handoff tests are categorized under `tests/unit` and `tests/integration`.
+
+Recording mode is captured before hotkey state returns to idle and travels through
+the immutable CaptureResult and CaptureTask into transcription and final insertion.
+Only hands-free recordings can type into focused Resolve; unknown focus blocks
+both modes. Existing callers without mode information default to push-to-talk.
+Interrupted recordings and device recovery retain their save-without-injection behavior.
 
 During GPU handoff, new captures are blocked atomically, existing captures finish
 normally, and a queue barrier confirms complete processing before the normal

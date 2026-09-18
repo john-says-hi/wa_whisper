@@ -12,6 +12,7 @@ from wa_whisper import focused_window, resolve_protection as protection
 from wa_whisper.dictation_archive import DictationArchive
 from wa_whisper.hotkeys import CaptureEndReason, CaptureResult
 from wa_whisper.recovery_queue import RecoveryQueueResult
+from wa_whisper.recording_mode import RecordingMode
 
 main = importlib.import_module("wa_whisper.main")
 
@@ -72,8 +73,13 @@ def test_failed_helper_blocks_insertion(monkeypatch, error):
 
 
 @pytest.mark.parametrize("mode", list(main.InjectionMode))
-@pytest.mark.parametrize("reason", [protection.RESOLVE_FOCUSED, protection.DETECTION_UNAVAILABLE])
-def test_every_delivery_mode_blocks_before_any_backend(tmp_path, monkeypatch, mode, reason):
+@pytest.mark.parametrize("recording_mode, reason", [
+    (RecordingMode.PUSH_TO_TALK, protection.RESOLVE_FOCUSED),
+    (RecordingMode.PUSH_TO_TALK, protection.DETECTION_UNAVAILABLE),
+    (RecordingMode.HANDS_FREE, protection.DETECTION_UNAVAILABLE),
+    (RecordingMode.IDLE, protection.RESOLVE_FOCUSED),
+])
+def test_every_delivery_mode_blocks_before_any_backend(tmp_path, monkeypatch, mode, recording_mode, reason):
     monkeypatch.setattr(protection, "insertion_block_reason", lambda: reason)
 
     def forbidden(*_args, **_kwargs):
@@ -82,7 +88,30 @@ def test_every_delivery_mode_blocks_before_any_backend(tmp_path, monkeypatch, mo
     for name in ("type_text_with_wtype", "type_text_with_xdotool", "inject_text_auto", "inject_text_orca_daemon"):
         monkeypatch.setattr(main, name, forbidden)
     with pytest.raises(protection.InsertionBlocked, match=reason):
-        main.inject_text("delete this", Path("xdotool"), tmp_path / "log", enable_beep=True, injection_mode=mode)
+        main.inject_text("delete this", Path("xdotool"), tmp_path / "log", enable_beep=True,
+                         injection_mode=mode, recording_mode=recording_mode)
+
+
+@pytest.mark.parametrize("mode", list(main.InjectionMode))
+def test_hands_free_allows_each_delivery_backend_into_resolve(tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(protection, "read_focused_window", lambda: focused_window.FocusedWindow("active", "resolve"))
+    typed = []
+
+    def deliver(text, *_args, **_kwargs):
+        typed.append(text)
+        return True
+
+    for name in ("type_text_with_wtype", "type_text_with_xdotool", "inject_text_auto", "inject_text_orca_daemon"):
+        monkeypatch.setattr(main, name, deliver)
+    assert main.inject_text("marker notes", Path("xdotool"), tmp_path / "log", enable_beep=False,
+                            injection_mode=mode, recording_mode=RecordingMode.HANDS_FREE)
+    assert typed == ["marker notes"]
+
+
+def test_callers_without_recording_mode_cannot_type_into_resolve(tmp_path, monkeypatch):
+    monkeypatch.setattr(protection, "read_focused_window", lambda: focused_window.FocusedWindow("active", "resolve"))
+    with pytest.raises(protection.InsertionBlocked, match=protection.RESOLVE_FOCUSED):
+        main.inject_text("legacy caller", Path("xdotool"), tmp_path / "log", enable_beep=False)
 
 
 @pytest.mark.parametrize("initial_app, final_app", [
@@ -93,8 +122,9 @@ def test_every_delivery_mode_blocks_before_any_backend(tmp_path, monkeypatch, mo
     ("dev.warp.Warp", None),
 ])
 @pytest.mark.parametrize("copyq_available", [True, False])
+@pytest.mark.parametrize("recording_mode", [RecordingMode.PUSH_TO_TALK, RecordingMode.HANDS_FREE])
 def test_delivery_uses_final_focus_and_keeps_blocked_transcript(
-    tmp_path, monkeypatch, initial_app, final_app, copyq_available,
+    tmp_path, monkeypatch, initial_app, final_app, copyq_available, recording_mode,
 ):
     focus = [initial_app]
     queries, history, typed, notices = [], [], [], []
@@ -118,7 +148,7 @@ def test_delivery_uses_final_focus_and_keeps_blocked_transcript(
     audio = tmp_path / "speech.wav"
     audio.write_bytes(b"recorded audio")
     capture = CaptureResult(path=audio, stats=None, created_at=datetime.now(timezone.utc),
-                            end_reason=CaptureEndReason.USER_COMPLETED)
+                            end_reason=CaptureEndReason.USER_COMPLETED, recording_mode=recording_mode)
     backend = SimpleNamespace(transcribe=transcribe)
     tasks = queue.Queue()
     main.handle_capture_result(capture, task_queue=tasks, archive=archive, backend=backend, log_path=tmp_path / "log")
@@ -126,6 +156,7 @@ def test_delivery_uses_final_focus_and_keeps_blocked_transcript(
     task = tasks.get_nowait()
     main.process_capture(
         audio_path=task.audio_path, stats=task.stats, created_at=task.created_at,
+        recording_mode=task.recording_mode,
         backend=backend, voice_isolation=None, log_path=tmp_path / "log",
         append_space=False, normalize_numbers=False, normalize_acronyms=False, ensure_punct=False,
         xdotool_bin=Path("xdotool"), enable_beep=False, injection_mode=main.InjectionMode.WTYPE,
@@ -140,7 +171,7 @@ def test_delivery_uses_final_focus_and_keeps_blocked_transcript(
     assert metadata["recovery_queue"]["inserted"] is copyq_available
     assert history == ["saved words"]
     assert tasks.empty()
-    if final_app == "resolve" or final_app is None:
+    if final_app is None or (final_app == "resolve" and recording_mode is RecordingMode.PUSH_TO_TALK):
         assert typed == []
         assert metadata["status"] == "saved_without_injection"
         assert metadata["injection"]["blocked_reason"] == (

@@ -18,6 +18,7 @@ from .audio_cues import play_system_bell
 from .evdev_listener import EvdevKeyListener, wayland_session
 from .log_utils import write_log
 from .recorder import Recorder, RecorderStartError, RecorderStats
+from .recording_mode import RecordingMode
 from .x11_key_shield import X11KeyShield
 
 
@@ -25,14 +26,6 @@ DEFAULT_HOTKEY_REPRESS_GRACE_SECONDS = 1.0
 HOTKEY_RELEASE_TIMEOUT_SECONDS = 5.0
 AUDIO_CONTROL_TIMEOUT_SECONDS = 1.0
 QUIESCE_CANCEL_POLL_SECONDS = 0.1
-
-
-class RecordingMode(Enum):
-    """Current hotkey-controlled recording mode."""
-
-    IDLE = "idle"
-    PUSH_TO_TALK = "push_to_talk"
-    HANDS_FREE = "hands_free"
 
 
 class CaptureEndReason(Enum):
@@ -51,11 +44,13 @@ class CaptureResult:
     stats: Optional[RecorderStats]
     created_at: datetime
     end_reason: CaptureEndReason
+    recording_mode: RecordingMode = RecordingMode.PUSH_TO_TALK
 
 
 @dataclass(frozen=True, slots=True)
 class _FinalizationRequest:
     created_at: datetime
+    recording_mode: RecordingMode
     silence_timeout: float
     end_reason: CaptureEndReason
     play_off_bell: bool
@@ -623,6 +618,7 @@ class PushToTalkHotkey:
             return None
 
         created_at = self._capture_started_at or utc_now()
+        recording_mode = self._mode
         self._mode = RecordingMode.IDLE
         self._capture_started_at = None
         self._finalizing_capture = True
@@ -630,6 +626,7 @@ class PushToTalkHotkey:
             self._ignore_presses_until = time.monotonic() + self._hotkey_repress_grace_seconds
         return _FinalizationRequest(
             created_at=created_at,
+            recording_mode=recording_mode,
             silence_timeout=silence_timeout,
             end_reason=end_reason,
             play_off_bell=play_off_bell,
@@ -672,6 +669,7 @@ class PushToTalkHotkey:
                 stats=stats,
                 created_at=finalization.created_at,
                 end_reason=finalization.end_reason,
+                recording_mode=finalization.recording_mode,
             )
             try:
                 self._on_capture_finished(result)

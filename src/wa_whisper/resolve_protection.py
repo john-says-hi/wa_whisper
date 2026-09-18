@@ -1,4 +1,4 @@
-"""Prevent desktop dictation from sending shortcuts into focused Resolve windows."""
+"""Require hands-free recording intent before typing into focused Resolve windows."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .focused_window import FocusUnavailable, read_focused_window
 from .log_utils import write_log
+from .recording_mode import RecordingMode
 
 RESOLVE_FOCUSED = "resolve_focused"
 DETECTION_UNAVAILABLE = "focus_detection_unavailable"
@@ -28,8 +29,10 @@ def insertion_block_reason() -> str | None:
     return RESOLVE_FOCUSED if focused.app_id.casefold() == "resolve" else None
 
 
-def ensure_insertion_allowed() -> None:
+def ensure_insertion_allowed(recording_mode: RecordingMode = RecordingMode.PUSH_TO_TALK) -> None:
     reason = insertion_block_reason()
+    if reason == RESOLVE_FOCUSED and recording_mode is RecordingMode.HANDS_FREE:
+        return
     if reason:
         raise InsertionBlocked(reason)
 

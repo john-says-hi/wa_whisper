@@ -32,6 +32,7 @@ from .log_utils import DEFAULT_LOG_PATH, write_log
 from .processing_queue import CaptureQueue, CaptureWorker, DrainBarrier
 from .recorder import Recorder, RecorderStats
 from .recording_admission import RecordingAdmission
+from .recording_mode import RecordingMode
 from .recovery_queue import insert_transcript_into_recovery_queue, skipped_recovery_queue_result
 from .text_postprocess import postprocess_text
 from .voice_isolation import VoiceIsolationPipeline
@@ -114,6 +115,7 @@ class CaptureTask:
     audio_path: Path
     stats: Optional[RecorderStats]
     created_at: datetime
+    recording_mode: RecordingMode = RecordingMode.PUSH_TO_TALK
 
 
 TaskItem = Optional[CaptureTask | DrainBarrier]
@@ -297,6 +299,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             audio_path=item.audio_path,
             stats=item.stats,
             created_at=item.created_at,
+            recording_mode=item.recording_mode,
             backend=backend,
             voice_isolation=voice_isolation,
             log_path=log_path,
@@ -415,6 +418,7 @@ def handle_capture_result(
                 audio_path=result.path,
                 stats=result.stats,
                 created_at=result.created_at,
+                recording_mode=result.recording_mode,
             )
         )
         return
@@ -498,6 +502,7 @@ def process_capture(
     orca_daemon_dir: Optional[Path],
     orca_session_id: Optional[str],
     archive: Optional[DictationArchive] = None,
+    recording_mode: RecordingMode = RecordingMode.PUSH_TO_TALK,
 ) -> None:
     write_log(f"Processing capture {audio_path}", log_path)
     if stats:
@@ -577,6 +582,7 @@ def process_capture(
                 text,
                 xdotool_bin,
                 log_path,
+                recording_mode=recording_mode,
                 enable_beep=enable_beep,
                 injection_mode=injection_mode,
                 orca_daemon_dir=orca_daemon_dir,
@@ -705,8 +711,9 @@ def inject_text(
     injection_mode: InjectionMode = InjectionMode.XDOTOOL_TYPE,
     orca_daemon_dir: Optional[Path] = None,
     orca_session_id: Optional[str] = None,
+    recording_mode: RecordingMode = RecordingMode.PUSH_TO_TALK,
 ) -> bool:
-    resolve_protection.ensure_insertion_allowed()
+    resolve_protection.ensure_insertion_allowed(recording_mode)
     if injection_mode == InjectionMode.ORCA_DAEMON:
         delivered = inject_text_orca_daemon(
             text,

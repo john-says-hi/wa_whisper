@@ -38,20 +38,24 @@ session. Hold Right Alt to dictate and release it to transcribe and inject text 
 
 ### Resolve protection on the COSMIC desktop
 
-Automatic typing is blocked only when a Resolve window has keyboard focus at
-delivery time, including its Project Settings dialog. Warp and other apps continue
-receiving dictation while Resolve is open in the background. Click the intended
-text field before transcription finishes; mouse position alone is not keyboard focus.
+Right Alt hold-and-release dictation does not type into a Resolve window that has
+keyboard focus at delivery time, including its Project Settings dialog. To dictate
+into Resolve, use Left Ctrl + Right Alt to start listen mode and the same chord to
+finish it. That recording is allowed to type into Resolve. Click the intended text
+field before transcription finishes; mouse position alone is not keyboard focus.
+Both hotkey modes work in Warp and other apps while Resolve is open in the background.
 
-If Resolve is focused, or focus cannot be determined, dictation still saves the
-audio and transcript and adds the text to CopyQ history without replacing your
-active clipboard. A desktop notification points to CopyQ history, or the archived
+If push-to-talk delivery is blocked by Resolve, or focus cannot be determined in
+either mode, dictation still saves the audio and transcript and adds the text to
+CopyQ history without replacing your active clipboard. A desktop notification points to CopyQ history, or the archived
 transcript if CopyQ is unavailable. Select the text and paste it manually. Blocked
 text is never automatically replayed after focus changes.
 
 The guard reads a fresh COSMIC/Wayland window snapshot immediately before delivery
 and matches the focused application ID, never the window title. Earlier focus
-during recording or queueing does not block a later delivery into Warp. This covers
+during recording or queueing does not block a later delivery into Warp. Each queued
+recording retains its own hotkey mode; starting a later listen-mode recording does
+not grant permission to earlier push-to-talk recordings. This covers
 desktop dictation using either GPU destination; the Windows microphone client is separate.
 Keep keyboard focus in the intended text field until typing finishes: the guard
 cannot retract a stream of keystrokes that was already dispatched before focus changed.
