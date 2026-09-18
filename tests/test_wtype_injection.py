@@ -14,6 +14,11 @@ main_mod = importlib.import_module("wa_whisper.main")
 InjectionMode = main_mod.InjectionMode
 
 
+@pytest.fixture(autouse=True)
+def resolve_is_closed(monkeypatch):
+    monkeypatch.setattr(main_mod.resolve_protection, "insertion_block_reason", lambda: None)
+
+
 def test_wtype_is_a_recognised_mode():
     assert main_mod.parse_injection_mode("wtype") is InjectionMode.WTYPE
 

@@ -20,6 +20,11 @@ CAPTURE_CREATED_AT = datetime(2026, 7, 28, 22, 30, 45, tzinfo=timezone.utc)
 CAPTURE_INTERRUPTED_AT = datetime(2026, 7, 28, 22, 31, 5, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def resolve_is_closed(monkeypatch):
+    monkeypatch.setattr(main_mod.resolve_protection, "insertion_block_reason", lambda: None)
+
+
 class FakeBackend:
     def __init__(self, text: str = "hello world", *, error: Exception | None = None) -> None:
         self.text = text

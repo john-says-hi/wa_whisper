@@ -195,6 +195,7 @@ def test_normal_right_alt_push_to_talk_is_unchanged(tmp_path):
     assert recorder.stop_timeouts == [0.0]
     assert captures[0].path == tmp_path / "capture-1.wav"
     assert captures[0].end_reason is hotkeys_mod.CaptureEndReason.USER_COMPLETED
+    assert captures[0].recording_mode is hotkeys_mod.RecordingMode.PUSH_TO_TALK
 
 
 def test_left_ctrl_then_right_alt_toggles_hands_free(tmp_path):
@@ -214,6 +215,7 @@ def test_left_ctrl_then_right_alt_toggles_hands_free(tmp_path):
     assert hotkey._mode is hotkeys_mod.RecordingMode.IDLE
     assert recorder.stop_timeouts == [0.0]
     assert captures[0].end_reason is hotkeys_mod.CaptureEndReason.USER_COMPLETED
+    assert captures[0].recording_mode is hotkeys_mod.RecordingMode.HANDS_FREE
 
 
 def test_plain_right_alt_is_ignored_while_hands_free_is_active(tmp_path):
@@ -245,6 +247,7 @@ def test_right_alt_then_left_ctrl_remains_push_to_talk(tmp_path):
 
     assert recorder.start_count == 1
     assert captures[0].end_reason is hotkeys_mod.CaptureEndReason.USER_COMPLETED
+    assert captures[0].recording_mode is hotkeys_mod.RecordingMode.PUSH_TO_TALK
 
 
 def test_right_ctrl_does_not_activate_hands_free(tmp_path):
@@ -260,6 +263,7 @@ def test_right_ctrl_does_not_activate_hands_free(tmp_path):
 
     assert recorder.start_count == 1
     assert recorder.stop_timeouts == [0.0]
+    assert captures[0].recording_mode is hotkeys_mod.RecordingMode.PUSH_TO_TALK
 
 
 def test_right_alt_repeat_cannot_double_toggle(tmp_path):
