@@ -45,7 +45,20 @@ finish it. That recording is allowed to type into Resolve. Click the intended te
 field before transcription finishes; mouse position alone is not keyboard focus.
 Both hotkey modes work in Warp and other apps while Resolve is open in the background.
 
-If push-to-talk delivery is blocked by Resolve, or focus cannot be determined in
+### RuneLite protection on the COSMIC desktop
+
+RuneLite gets the opposite rule. Right Alt hold-and-release dictation types into a
+RuneLite window that has keyboard focus at delivery time. Left Ctrl + Right Alt
+listen mode does not. The rule covers the whole RuneLite window, including game
+chat and every plugin panel, because the guard sees windows, not the panels inside
+them. It matches any application ID that starts with `net-runelite-`: the Jagex
+launcher start reports `net-runelite-launcher-Launcher`. The Jagex Launcher login
+window (`jagex-launcher`) is not protected. Click RuneLite's chat box before
+transcription finishes; typed text that lands outside a text field can act as game keys.
+
+### Blocked dictation and focus detection
+
+If delivery is blocked by Resolve or RuneLite, or focus cannot be determined in
 either mode, dictation still saves the audio and transcript and adds the text to
 CopyQ history without replacing your active clipboard. A desktop notification points to CopyQ history, or the archived
 transcript if CopyQ is unavailable. Select the text and paste it manually. Blocked
@@ -54,8 +67,8 @@ text is never automatically replayed after focus changes.
 The guard reads a fresh COSMIC/Wayland window snapshot immediately before delivery
 and matches the focused application ID, never the window title. Earlier focus
 during recording or queueing does not block a later delivery into Warp. Each queued
-recording retains its own hotkey mode; starting a later listen-mode recording does
-not grant permission to earlier push-to-talk recordings. This covers
+recording retains its own hotkey mode; a later recording never lends its permission
+to an earlier one. This covers
 desktop dictation using either GPU destination; the Windows microphone client is separate.
 Keep keyboard focus in the intended text field until typing finishes: the guard
 cannot retract a stream of keystrokes that was already dispatched before focus changed.

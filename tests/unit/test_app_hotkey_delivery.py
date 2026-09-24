@@ -1,4 +1,4 @@
-"""Per-recording Resolve permission across real hotkey completion and queued delivery."""
+"""Per-recording protected-app permission across real hotkey completion and queued delivery."""
 
 import importlib
 import json
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from wa_whisper import focused_window, hotkeys, resolve_protection
+from wa_whisper import app_protection, focused_window, hotkeys
 from wa_whisper.dictation_archive import DictationArchive
 from wa_whisper.processing_queue import CaptureQueue
 from wa_whisper.recording_mode import RecordingMode
@@ -49,16 +49,22 @@ def wait_for_finalization(key):
         time.sleep(0.005)
 
 
+@pytest.mark.parametrize("app_id, allowed_mode", [
+    ("resolve", RecordingMode.HANDS_FREE),
+    ("net-runelite-launcher-Launcher", RecordingMode.PUSH_TO_TALK),
+])
 @pytest.mark.parametrize("first_mode", [RecordingMode.PUSH_TO_TALK, RecordingMode.HANDS_FREE])
-def test_mixed_hotkeys_keep_their_own_permission_while_transcription_is_queued(tmp_path, monkeypatch, first_mode):
+def test_mixed_hotkeys_keep_their_own_permission_while_transcription_is_queued(
+    tmp_path, monkeypatch, first_mode, app_id, allowed_mode,
+):
     monkeypatch.setattr(hotkeys, "play_system_bell", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(resolve_protection, "read_focused_window",
-                        lambda: focused_window.FocusedWindow("active", "resolve"))
+    monkeypatch.setattr(app_protection, "read_focused_window",
+                        lambda: focused_window.FocusedWindow("active", app_id))
     typed, history, notices = [], [], []
     monkeypatch.setattr(main, "type_text_with_wtype", lambda text, _log: typed.append(text) or True)
     monkeypatch.setattr(main, "insert_transcript_into_recovery_queue",
                         lambda text, _log: history.append(text) or RecoveryQueueResult("copyq", True, 1))
-    monkeypatch.setattr(resolve_protection, "notify_saved_transcript", lambda *args: notices.append(args))
+    monkeypatch.setattr(app_protection, "notify_saved_transcript", lambda *args: notices.append(args))
     queue = CaptureQueue()
     archive = DictationArchive(root=tmp_path / "archive")
     backend = SimpleNamespace(transcribe=lambda _path: SimpleNamespace(text="marker words", info={}))
@@ -100,13 +106,13 @@ def test_mixed_hotkeys_keep_their_own_permission_while_transcription_is_queued(t
             )
             metadata = json.loads((archive.latest_dir / "metadata.json").read_text())
             assert metadata["status"] == (
-                "injected" if mode is RecordingMode.HANDS_FREE else "saved_without_injection")
+                "injected" if mode is allowed_mode else "saved_without_injection")
             assert (archive.latest_dir / "audio.wav").read_bytes() == b"saved audio"
             assert (archive.latest_dir / "transcript.txt").read_text() == "marker words"
             queue.task_done()
         assert queue.empty()
-        assert typed == ["marker words"] * modes.count(RecordingMode.HANDS_FREE)
+        assert typed == ["marker words"] * modes.count(allowed_mode)
         assert history == ["marker words"] * len(modes)
-        assert len(notices) == modes.count(RecordingMode.PUSH_TO_TALK)
+        assert len(notices) == len(modes) - modes.count(allowed_mode)
     finally:
         key.stop()

@@ -16,7 +16,7 @@ InjectionMode = main_mod.InjectionMode
 
 @pytest.fixture(autouse=True)
 def resolve_is_closed(monkeypatch):
-    monkeypatch.setattr(main_mod.resolve_protection, "insertion_block_reason", lambda: None)
+    monkeypatch.setattr(main_mod.app_protection, "insertion_block_reason", lambda: None)
 
 
 def test_wtype_is_a_recognised_mode():

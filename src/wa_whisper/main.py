@@ -20,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
 
-from . import resolve_protection
+from . import app_protection
 from .audio_cues import play_system_bell
 from .admission import enabled as shared_admission_enabled
 from .compute_mode import ComputeModeError, compute_mode_values, resolve_compute_device
@@ -588,7 +588,7 @@ def process_capture(
                 orca_daemon_dir=orca_daemon_dir,
                 orca_session_id=orca_session_id,
             )
-        except resolve_protection.InsertionBlocked as exc:
+        except app_protection.InsertionBlocked as exc:
             update_dictation_archive_record(
                 archive, archive_record, log_path,
                 status="saved_without_injection",
@@ -600,7 +600,7 @@ def process_capture(
                 "CopyQ history" if recovery_queue_result.inserted
                 else str(archive_record.transcript_path) if archive_record else "the dictation archive"
             )
-            resolve_protection.notify_saved_transcript(exc.reason, destination, log_path)
+            app_protection.notify_saved_transcript(exc.reason, destination, log_path)
             return
         update_dictation_archive_record(
             archive,
@@ -713,7 +713,7 @@ def inject_text(
     orca_session_id: Optional[str] = None,
     recording_mode: RecordingMode = RecordingMode.PUSH_TO_TALK,
 ) -> bool:
-    resolve_protection.ensure_insertion_allowed(recording_mode)
+    app_protection.ensure_insertion_allowed(recording_mode)
     if injection_mode == InjectionMode.ORCA_DAEMON:
         delivered = inject_text_orca_daemon(
             text,

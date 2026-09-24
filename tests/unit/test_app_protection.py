@@ -8,13 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from wa_whisper import focused_window, resolve_protection as protection
+from wa_whisper import focused_window, app_protection as protection
 from wa_whisper.dictation_archive import DictationArchive
 from wa_whisper.hotkeys import CaptureEndReason, CaptureResult
 from wa_whisper.recovery_queue import RecoveryQueueResult
 from wa_whisper.recording_mode import RecordingMode
 
 main = importlib.import_module("wa_whisper.main")
+
+RUNELITE = "net-runelite-launcher-Launcher"
 
 
 def window(app_id, activated, **overrides):
@@ -29,6 +31,10 @@ def window(app_id, activated, **overrides):
      protection.RESOLVE_FOCUSED),
     ([window("dev.warp.Warp", True, title="DaVinci Resolve"), window("resolve", False)], None),
     ([window("google-chrome", True), window("resolve", False, state_known=False)], None),
+    ([window("dev.warp.Warp", False), window(RUNELITE, True)], protection.RUNELITE_FOCUSED),
+    ([window("net-runelite-client-RuneLite", True)], protection.RUNELITE_FOCUSED),
+    ([window("dev.warp.Warp", True, title="RuneLite - John VIII"), window(RUNELITE, False)], None),
+    ([window("jagex-launcher", True), window(RUNELITE, False)], None),
     ([window("dev.warp.Warp", False), window("resolve", False)], protection.DETECTION_UNAVAILABLE),
     ([window("dev.warp.Warp", True), window("resolve", True)], protection.DETECTION_UNAVAILABLE),
     ([window("dev.warp.Warp", True, state_known=False)], protection.DETECTION_UNAVAILABLE),
@@ -78,12 +84,14 @@ def test_failed_helper_blocks_insertion(monkeypatch, error):
     (RecordingMode.PUSH_TO_TALK, protection.DETECTION_UNAVAILABLE),
     (RecordingMode.HANDS_FREE, protection.DETECTION_UNAVAILABLE),
     (RecordingMode.IDLE, protection.RESOLVE_FOCUSED),
+    (RecordingMode.HANDS_FREE, protection.RUNELITE_FOCUSED),
+    (RecordingMode.IDLE, protection.RUNELITE_FOCUSED),
 ])
 def test_every_delivery_mode_blocks_before_any_backend(tmp_path, monkeypatch, mode, recording_mode, reason):
     monkeypatch.setattr(protection, "insertion_block_reason", lambda: reason)
 
     def forbidden(*_args, **_kwargs):
-        pytest.fail("No input backend may run when Resolve has focus or focus is unknown")
+        pytest.fail("No input backend may run when a protected app has focus or focus is unknown")
 
     for name in ("type_text_with_wtype", "type_text_with_xdotool", "inject_text_auto", "inject_text_orca_daemon"):
         monkeypatch.setattr(main, name, forbidden)
@@ -93,8 +101,14 @@ def test_every_delivery_mode_blocks_before_any_backend(tmp_path, monkeypatch, mo
 
 
 @pytest.mark.parametrize("mode", list(main.InjectionMode))
-def test_hands_free_allows_each_delivery_backend_into_resolve(tmp_path, monkeypatch, mode):
-    monkeypatch.setattr(protection, "read_focused_window", lambda: focused_window.FocusedWindow("active", "resolve"))
+@pytest.mark.parametrize("app_id, recording_mode", [
+    ("resolve", RecordingMode.HANDS_FREE),
+    (RUNELITE, RecordingMode.PUSH_TO_TALK),
+])
+def test_permitted_hotkey_allows_each_delivery_backend_into_protected_app(
+    tmp_path, monkeypatch, mode, app_id, recording_mode,
+):
+    monkeypatch.setattr(protection, "read_focused_window", lambda: focused_window.FocusedWindow("active", app_id))
     typed = []
 
     def deliver(text, *_args, **_kwargs):
@@ -104,7 +118,7 @@ def test_hands_free_allows_each_delivery_backend_into_resolve(tmp_path, monkeypa
     for name in ("type_text_with_wtype", "type_text_with_xdotool", "inject_text_auto", "inject_text_orca_daemon"):
         monkeypatch.setattr(main, name, deliver)
     assert main.inject_text("marker notes", Path("xdotool"), tmp_path / "log", enable_beep=False,
-                            injection_mode=mode, recording_mode=RecordingMode.HANDS_FREE)
+                            injection_mode=mode, recording_mode=recording_mode)
     assert typed == ["marker notes"]
 
 
@@ -120,6 +134,9 @@ def test_callers_without_recording_mode_cannot_type_into_resolve(tmp_path, monke
     ("dev.warp.Warp", "dev.warp.Warp"),
     ("resolve", "resolve"),
     ("dev.warp.Warp", None),
+    ("dev.warp.Warp", RUNELITE),
+    (RUNELITE, "dev.warp.Warp"),
+    (RUNELITE, RUNELITE),
 ])
 @pytest.mark.parametrize("copyq_available", [True, False])
 @pytest.mark.parametrize("recording_mode", [RecordingMode.PUSH_TO_TALK, RecordingMode.HANDS_FREE])
@@ -171,11 +188,15 @@ def test_delivery_uses_final_focus_and_keeps_blocked_transcript(
     assert metadata["recovery_queue"]["inserted"] is copyq_available
     assert history == ["saved words"]
     assert tasks.empty()
-    if final_app is None or (final_app == "resolve" and recording_mode is RecordingMode.PUSH_TO_TALK):
+    blocked_reason = {
+        None: protection.DETECTION_UNAVAILABLE,
+        "resolve": protection.RESOLVE_FOCUSED if recording_mode is RecordingMode.PUSH_TO_TALK else None,
+        RUNELITE: protection.RUNELITE_FOCUSED if recording_mode is RecordingMode.HANDS_FREE else None,
+    }.get(final_app)
+    if blocked_reason:
         assert typed == []
         assert metadata["status"] == "saved_without_injection"
-        assert metadata["injection"]["blocked_reason"] == (
-            protection.RESOLVE_FOCUSED if final_app else protection.DETECTION_UNAVAILABLE)
+        assert metadata["injection"]["blocked_reason"] == blocked_reason
         if copyq_available:
             assert notices[0][1] == "CopyQ history"
         else:
@@ -195,3 +216,17 @@ def test_notification_failure_preserves_blocked_result(tmp_path, monkeypatch):
     monkeypatch.setattr(protection.subprocess, "run", timeout)
     protection.notify_saved_transcript(protection.RESOLVE_FOCUSED, "CopyQ history", tmp_path / "log")
     assert "notification failed" in (tmp_path / "log").read_text()
+
+
+@pytest.mark.parametrize("reason, explanation", [
+    (protection.RESOLVE_FOCUSED, "DaVinci Resolve has keyboard focus."),
+    (protection.RUNELITE_FOCUSED, "RuneLite has keyboard focus."),
+    (protection.DETECTION_UNAVAILABLE, "The keyboard-focused application could not be identified."),
+])
+def test_notification_names_the_blocking_app(tmp_path, monkeypatch, reason, explanation):
+    calls = []
+    monkeypatch.setattr(protection.shutil, "which", lambda _name: "/usr/bin/gdbus")
+    monkeypatch.setattr(protection.subprocess, "run", lambda command, **_kwargs: calls.append(command))
+    protection.notify_saved_transcript(reason, "CopyQ history", tmp_path / "log")
+    assert calls[0][calls[0].index("Dictation saved") + 1] == (
+        f"{explanation} Automatic typing is paused. Retrieve your text from CopyQ history.")
