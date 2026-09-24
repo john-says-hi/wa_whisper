@@ -13,7 +13,7 @@ main_mod = importlib.import_module("wa_whisper.main")
 
 @pytest.fixture(autouse=True)
 def resolve_is_closed(monkeypatch):
-    monkeypatch.setattr(main_mod.resolve_protection, "insertion_block_reason", lambda: None)
+    monkeypatch.setattr(main_mod.app_protection, "insertion_block_reason", lambda: None)
 
 
 class FakeOrcaStream:

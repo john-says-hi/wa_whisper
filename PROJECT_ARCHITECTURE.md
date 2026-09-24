@@ -13,7 +13,7 @@ loads dictation dependencies lazily so control clients need no Torch import.
 | `whisper_backend.py` | Lazy model loading and transcription |
 | `faster_whisper_backend.py` | Full-model CTranslate2 loading, decoding adaptation and segment conversion |
 | `dictation_archive.py`, `recovery_queue.py` | Durable audio/text recovery and CopyQ recovery |
-| `focused_window.py`, `resolve_protection.py` | COSMIC keyboard-focus detection, push-to-talk blocking in Resolve, hands-free permission and saved-text notices |
+| `focused_window.py`, `app_protection.py` | COSMIC keyboard-focus detection, per-app hotkey permission table (Resolve: hands-free only; RuneLite: push-to-talk only) and saved-text notices |
 | `control_state.py` | Lease ownership, capture/processing drain, shutdown commitment |
 | `control_server.py`, `control_protocol.py`, `control_cli.py` | Private local control transport and CLI |
 | `compute_mode.py`, `mode_cli.py` | Persisted compute selection and service restart |
@@ -25,8 +25,8 @@ handoff tests are categorized under `tests/unit` and `tests/integration`.
 
 Recording mode is captured before hotkey state returns to idle and travels through
 the immutable CaptureResult and CaptureTask into transcription and final insertion.
-Only hands-free recordings can type into focused Resolve; unknown focus blocks
-both modes. Existing callers without mode information default to push-to-talk.
+Only hands-free recordings can type into focused Resolve and only push-to-talk
+recordings can type into focused RuneLite; unknown focus blocks both modes. Existing callers without mode information default to push-to-talk.
 Interrupted recordings and device recovery retain their save-without-injection behavior.
 
 During GPU handoff, new captures are blocked atomically, existing captures finish
